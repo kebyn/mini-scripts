@@ -14,18 +14,13 @@ import (
 
 func main() {
     var (
-        frontend = os.Args[1]
-        locsrv = os.Args[2]
         ipaddress   string
         password    string
         instanceid  string
         status      string
         err         error
     )
-    const (
-        docker_registry = ""
-    )
-    releasetime, err := strconv.Atoi(os.Args[3])
+    releasetime, err := strconv.Atoi(os.Args[1])
     if err != nil {
          log.Panicf("%v\n", err)
     }
