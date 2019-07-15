@@ -2,11 +2,11 @@ FROM golang
 
 WORKDIR /
 
-COPY main.go .
+COPY golang/examples/main.go .
 
 RUN CGO_ENABLED=0 GOOS=linux go build main.go
 
-FROM alpine
+FROM scratch
 
 COPY --from=0 /main /
 
