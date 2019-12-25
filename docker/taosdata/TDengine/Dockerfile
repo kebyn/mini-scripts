@@ -1,11 +1,11 @@
 FROM gcc:latest
 
 RUN apt update && \
-    apt-get install -y cmake && \
+    apt-get install -y cmake build-essential && \
     git clone https://github.com/taosdata/TDengine.git && \
     cd TDengine && mkdir build && cd build && \
     cmake .. && cmake --build . && \
-    make install && \
+    make install || true && \
     rm -rf /TDengine && \
     sed -i  's/# charset/charset/' /etc/taos/taos.cfg && \
     sed -i  's/# dataDir/dataDir/' /etc/taos/taos.cfg && \
