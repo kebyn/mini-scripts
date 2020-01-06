@@ -5,7 +5,8 @@ RUN apt update && \
     git clone https://github.com/taosdata/TDengine.git && \
     cd TDengine && mkdir build && cd build && \
     cmake .. && cmake --build . && \
-    make install || true && \
+    perl -i -pe 's/^(\s+install_service$)/#\1/'  /TDengine/packaging/tools/make_install.sh && \
+    make install && \
     rm -rf /TDengine && \
     sed -i  's/# charset/charset/' /etc/taos/taos.cfg && \
     sed -i  's/# dataDir/dataDir/' /etc/taos/taos.cfg && \
