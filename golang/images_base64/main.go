@@ -3,8 +3,11 @@ package main
 import (
 	"encoding/base64"
 	"flag"
+	"fmt"
 	"io/ioutil"
 	"log"
+
+	"github.com/atotto/clipboard"
 )
 
 func main() {
@@ -19,6 +22,11 @@ func main() {
 
 	base64String := base64.StdEncoding.EncodeToString(buffer)
 
-	log.Printf("%v", base64String)
+	markdownString := fmt.Sprintf(`<img alt="" src="data:image/png;base64,%s" />`, base64String)
+	err = clipboard.WriteAll(markdownString)
+	if err != nil {
+		log.Panicf("write clipboard error: %v", err)
+	}
 
+	log.Printf("write clipboard sucessed.")
 }
