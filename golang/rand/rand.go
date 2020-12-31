@@ -9,7 +9,6 @@ import (
 	"time"
 )
 
-// 生成位数
 func main() {
 	n, err := strconv.Atoi(os.Args[1])
 	if err != nil {
@@ -19,7 +18,6 @@ func main() {
 	log.Printf("%v\n", password)
 }
 
-// 确认随机字符包含大小写字母、数字、特殊字符
 func Randpassword(n int) (randstring string) {
 	if n < 4 {
 		log.Panicf("n must be greater than 3\n")
@@ -37,7 +35,6 @@ func Randpassword(n int) (randstring string) {
 	return randstring
 }
 
-// 随机生成字符
 func RandStringBytesMaskImprSrc(n int) string {
 	const letterBytes = "1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ()`~!@#$%^&*-+=|{}[]:;<>,.?/"
 	src := rand.NewSource(time.Now().UnixNano())
