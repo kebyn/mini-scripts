@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"path/filepath"
 
 	"github.com/atotto/clipboard"
 )
@@ -22,7 +23,7 @@ func main() {
 
 	base64String := base64.StdEncoding.EncodeToString(buffer)
 
-	markdownString := fmt.Sprintf(`<img alt="" src="data:image/png;base64,%s" />`, base64String)
+	markdownString := fmt.Sprintf(`<img alt="%s" src="data:image/png;base64,%s" />`, filepath.Base(filename), base64String)
 	err = clipboard.WriteAll(markdownString)
 	if err != nil {
 		log.Panicf("write clipboard error: %v", err)
