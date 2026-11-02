@@ -1,0 +1,10 @@
+/images/
+/disk.img
+/seed.img
+/meta-data
+/qemu.pid
+/console.log
+/monitor.sock
+/id_ed25519
+/id_ed25519.pub
+/qemu-*.log
