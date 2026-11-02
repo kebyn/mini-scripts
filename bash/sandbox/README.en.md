@@ -1,0 +1,134 @@
+# sandbox
+
+[中文](README.md) | English
+
+Launch Debian 13 / Rocky 10 cloud images with QEMU, KVM and passt.
+
+## Files
+
+- `sandbox.sh`: the single implementation. Subcommands: `bootstrap`, `run`, `stop`; supports Chinese/English output and `curl | bash`.
+- `user-data.yaml.tmpl`: used to generate `~/user-data.yaml` when it is missing. `sandbox.sh` embeds the same template for pipe mode.
+- `.gitignore`: images, disks, seeds, logs and keys stay out of the repository.
+
+## Quick start
+
+### Local
+
+```bash
+./sandbox.sh bootstrap --qemu-version v11.1.2 --jobs "$(nproc)"
+./sandbox.sh run --background
+./sandbox.sh stop
+```
+
+`bootstrap` needs root (apt and installation to `/usr/local/`). Prefix it with `sudo` when needed. LTO is enabled by default; use `--no-lto` on low-memory hosts. Re-running with the same tag skips the build; upgrade by changing the tag:
+
+```bash
+./sandbox.sh bootstrap --qemu-version latest
+```
+
+QEMU sources and build trees live in `/root/qemu-<tag>`. After a successful install, other `qemu-*` build trees are removed by default; `--keep-old-builds` keeps them.
+
+### curl
+
+```bash
+# Build QEMU (root required)
+curl -fsSL https://raw.githubusercontent.com/kebyn/sandbox/main/sandbox.sh \
+  | sudo bash -s -- bootstrap --qemu-version v11.1.2 --lang en
+
+# Start; pipe mode switches to background automatically
+curl -fsSL https://raw.githubusercontent.com/kebyn/sandbox/main/sandbox.sh \
+  | bash -s -- run --background --lang en
+
+# Clean shutdown
+curl -fsSL https://raw.githubusercontent.com/kebyn/sandbox/main/sandbox.sh \
+  | bash -s -- stop
+```
+
+Pipe mode uses the embedded user-data template, so it does not depend on local files. `curl | bash` executes remote code; review the commit or download the script first in production.
+
+## Language
+
+```bash
+./sandbox.sh run --lang zh --dry-run
+./sandbox.sh run --lang en --dry-run
+VM_LANG=zh ./sandbox.sh run --dry-run
+```
+
+`--lang` accepts `auto`, `zh` or `en` and defaults to `auto`. `auto` checks `LC_ALL`, then `LC_MESSAGES`, then `LANG`; `zh*` selects Chinese, everything else English.
+
+## run defaults
+
+- Distro: Debian 13
+- vCPUs: `min(4, nproc)`
+- RAM: `min(8192, MemAvailable - 1024)` MiB
+- Disk: 90% of free space on the filesystem containing `/data`
+- Ports: SSH `8022`, HTTP `8080`, HTTPS `8443`; all IPv4 and IPv6 addresses by default
+
+Log in:
+
+```bash
+ssh -p 8022 dev@127.0.0.1
+```
+
+If `~/user-data.yaml` exists, it is used unchanged. The script cannot infer its user or key; use `--ssh-user` / `--ssh-key` to adjust the login hint. If it is missing, the script creates `~/user-data.yaml` and `/data/id_ed25519`.
+
+Foreground mode needs a terminal:
+
+```bash
+./sandbox.sh run
+```
+
+Quit QEMU with `Ctrl-A X`.
+
+## Disk behavior
+
+Every start overwrites `/data/disk.img` from the base image, so guest changes are lost. This is intended for sandboxes.
+
+Keep the previous system disk:
+
+```bash
+./sandbox.sh run --keep-disk --background
+./sandbox.sh stop
+```
+
+Force a fresh base image download (the work disk still follows `--keep-disk`):
+
+```bash
+./sandbox.sh run --fresh-image --background
+```
+
+## Common options
+
+```bash
+./sandbox.sh run --distro rocky --cpus 4 --mem 8192 --disk 100G
+./sandbox.sh run --accel tcg                 # no KVM
+./sandbox.sh run --net-backend user          # passt unavailable
+./sandbox.sh run --bind-addr 127.0.0.1       # localhost only
+./sandbox.sh run --dry-run                   # print the QEMU command
+./sandbox.sh run --help                      # all options
+```
+
+The Rocky image is about 520 MB; Debian is about 440 MB. `--disk` is sized dynamically and does not preallocate the full virtual size.
+
+## Pipe-mode limits
+
+- Pipe mode automatically uses `--background` because stdin is consumed by curl, so the foreground serial console is unavailable.
+- For a foreground console, download the script first:
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/kebyn/sandbox/main/sandbox.sh -o sandbox.sh
+  chmod +x sandbox.sh
+  ./sandbox.sh run
+  ```
+- `stop`, `--dry-run` and `bootstrap` work normally in pipe mode.
+
+## Troubleshooting
+
+**`passt` unavailable**: make sure `passt` is installed and QEMU's `-netdev help` lists `passt`. `run` falls back to QEMU user networking by default; an explicit `--net-backend passt` fails instead.
+
+**KVM unavailable**: `/dev/kvm` must be readable and writable. Without nested virtualization use `--accel tcg`; boot will be much slower.
+
+**Port in use**: the script checks 8022/8080/8443 before starting and prints the owner. Change ports with `--ssh-port` and friends.
+
+**Stopping the background VM**: prefer `./sandbox.sh stop`, which requests an ACPI shutdown through the QEMU monitor. `kill` or `Ctrl-A X` terminates QEMU abruptly; with `--keep-disk`, an unclean ext4 can lose the Debian cloud image's SSH host keys and break the next `sshd` start.
+
+**cloud-init changes ignored**: the instance-id is derived from the user-data hash. Restart after editing user-data, or add `--recreate-seed` to force a new seed.
