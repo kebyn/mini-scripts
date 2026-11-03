@@ -84,6 +84,32 @@ Foreground mode needs a terminal:
 
 Quit QEMU with `Ctrl-A X`.
 
+## Supported distributions
+
+| Alias | Version |
+| --- | --- |
+| `debian`, `debian-13` | Debian 13 |
+| `ubuntu`, `ubuntu-24.04` | Ubuntu 24.04 LTS |
+| `ubuntu-26.04` | Ubuntu 26.04 LTS |
+| `rocky`, `rocky-10` | Rocky Linux 10 |
+| `alma`, `almalinux`, `alma-10` | AlmaLinux 10 |
+| `centos`, `centos-10` | CentOS Stream 10 |
+| `fedora`, `fedora-44` | Fedora 44 |
+| `opensuse`, `leap`, `leap-16.0` | openSUSE Leap 16.0 |
+| `tumbleweed` | openSUSE Tumbleweed |
+| `arch`, `archlinux` | Arch Linux |
+| `alpine`, `alpine-3.23` | Alpine 3.23 |
+
+```bash
+./sandbox.sh run --distro ubuntu --background
+./sandbox.sh run --distro alpine --background
+./sandbox.sh run --list-distros
+```
+
+Aliases are pinned to the versions above. Use `--url` for a newer build or a custom image; `--image` still accepts a local qcow2/raw image.
+
+Alpine's cloud image uses a partitionless disk and rejects a locked cloud-init account. The generated `user-data` template sets `lock_passwd: false`, `passwd: "*"` and `shell: /bin/sh`; add the same settings if you use a custom `~/user-data.yaml`.
+
 ## Disk behavior
 
 Every start overwrites `/data/disk.img` from the base image, so guest changes are lost. This is intended for sandboxes.
@@ -105,6 +131,7 @@ Force a fresh base image download (the work disk still follows `--keep-disk`):
 
 ```bash
 ./sandbox.sh run --distro rocky --cpus 4 --mem 8192 --disk 100G
+./sandbox.sh run --list-distros              # supported aliases
 ./sandbox.sh run --accel tcg                 # no KVM
 ./sandbox.sh run --net-backend user          # passt unavailable
 ./sandbox.sh run --bind-addr 127.0.0.1       # localhost only

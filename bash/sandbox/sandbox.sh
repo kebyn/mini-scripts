@@ -115,7 +115,8 @@ run_usage_zh() {
 用法:
   sandbox.sh run [选项]
 
-  -d, --distro debian|rocky    基底镜像（默认 debian）
+  -d, --distro NAME            发行版别名（默认 debian；--list-distros 查看）
+      --list-distros           列出支持的发行版别名、版本和镜像地址
   -i, --image PATH             使用已有镜像作为基底
       --url URL                覆盖基底下载地址
   -c, --cpus N                 vCPU 数（默认 min(4, nproc)）
@@ -152,7 +153,8 @@ run_usage_en() {
 Usage:
   sandbox.sh run [options]
 
-  -d, --distro debian|rocky    Base image (default: debian)
+  -d, --distro NAME            Distro alias (default: debian; see --list-distros)
+      --list-distros           List supported distro aliases, versions and image URLs
   -i, --image PATH             Use an existing image as the base
       --url URL                Override the base image URL
   -c, --cpus N                 vCPUs (default: min(4, nproc))
@@ -233,7 +235,9 @@ fi
 readonly EMBEDDED_USER_DATA='#cloud-config
 users:
   - name: dev
-    shell: /bin/bash
+    shell: /bin/sh
+    lock_passwd: false
+    passwd: "*"
     sudo: ALL=(ALL) NOPASSWD:ALL
     ssh_authorized_keys:
       - __SSH_PUBKEY__
@@ -562,10 +566,88 @@ bootstrap_main() {
 }
 
 # ---------------------------------------------------------------------------
+# Distro registry and listing.
+# ---------------------------------------------------------------------------
+distro_info() {
+    local name="$1"
+    DISTRO_FORMAT=qcow2
+    case "$name" in
+        debian|debian-13)
+            DISTRO_LABEL="Debian 13"
+            DISTRO_ALIASES="debian, debian-13"
+            DISTRO_URL="https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2"
+            ;;
+        ubuntu|ubuntu-24.04)
+            DISTRO_LABEL="Ubuntu 24.04 LTS"
+            DISTRO_ALIASES="ubuntu, ubuntu-24.04"
+            DISTRO_URL="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+            ;;
+        ubuntu-26.04)
+            DISTRO_LABEL="Ubuntu 26.04 LTS"
+            DISTRO_ALIASES="ubuntu-26.04"
+            DISTRO_URL="https://cloud-images.ubuntu.com/resolute/current/resolute-server-cloudimg-amd64.img"
+            ;;
+        rocky|rocky-10)
+            DISTRO_LABEL="Rocky Linux 10"
+            DISTRO_ALIASES="rocky, rocky-10"
+            DISTRO_URL="https://dl.rockylinux.org/pub/rocky/10/images/x86_64/Rocky-10-GenericCloud-Base.latest.x86_64.qcow2"
+            ;;
+        alma|almalinux|alma-10)
+            DISTRO_LABEL="AlmaLinux 10"
+            DISTRO_ALIASES="alma, almalinux, alma-10"
+            DISTRO_URL="https://repo.almalinux.org/almalinux/10/cloud/x86_64/images/AlmaLinux-10-GenericCloud-latest.x86_64.qcow2"
+            ;;
+        centos|centos-10)
+            DISTRO_LABEL="CentOS Stream 10"
+            DISTRO_ALIASES="centos, centos-10"
+            DISTRO_URL="https://cloud.centos.org/centos/10-stream/x86_64/images/CentOS-Stream-GenericCloud-10-latest.x86_64.qcow2"
+            ;;
+        fedora|fedora-44)
+            DISTRO_LABEL="Fedora 44"
+            DISTRO_ALIASES="fedora, fedora-44"
+            DISTRO_URL="https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
+            ;;
+        opensuse|leap|leap-16.0)
+            DISTRO_LABEL="openSUSE Leap 16.0"
+            DISTRO_ALIASES="opensuse, leap, leap-16.0"
+            DISTRO_URL="https://download.opensuse.org/distribution/leap/16.0/appliances/Leap-16.0-Minimal-VM.x86_64-Cloud.qcow2"
+            ;;
+        tumbleweed)
+            DISTRO_LABEL="openSUSE Tumbleweed"
+            DISTRO_ALIASES="tumbleweed"
+            DISTRO_URL="https://download.opensuse.org/tumbleweed/appliances/openSUSE-Tumbleweed-Minimal-VM.x86_64-Cloud.qcow2"
+            ;;
+        arch|archlinux)
+            DISTRO_LABEL="Arch Linux"
+            DISTRO_ALIASES="arch, archlinux"
+            DISTRO_URL="https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2"
+            ;;
+        alpine|alpine-3.23)
+            DISTRO_LABEL="Alpine 3.23"
+            DISTRO_ALIASES="alpine, alpine-3.23"
+            DISTRO_URL="https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/cloud/nocloud_alpine-3.23.4-x86_64-bios-cloudinit-r0.qcow2"
+            ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
+list_distros() {
+    local alias
+    printf '%-30s %-20s %s\n' "$(t '别名' 'ALIAS')" "$(t '版本' 'VERSION')" "$(t '镜像地址' 'URL')"
+    for alias in debian ubuntu ubuntu-26.04 rocky alma centos fedora opensuse tumbleweed arch alpine; do
+        if distro_info "$alias"; then
+            printf '%-30s %-20s %s\n' "$DISTRO_ALIASES" "$DISTRO_LABEL" "$DISTRO_URL"
+        fi
+    done
+}
+
+# ---------------------------------------------------------------------------
 # run
 # ---------------------------------------------------------------------------
 run_main() {
     DISTRO="${VM_DISTRO:-debian}"
+    LIST_DISTROS=0
     CPUS="${VM_CPUS:-}"
     MEM_MIB="${VM_MEM_MIB:-}"
     DISK_SPEC="${VM_DISK:-}"
@@ -601,6 +683,7 @@ run_main() {
     while [ $# -gt 0 ]; do
         case "$1" in
             -d|--distro)      DISTRO="${2:?missing value for --distro}"; shift 2 ;;
+            --list-distros)   LIST_DISTROS=1; shift ;;
             -i|--image)       IMAGE="${2:?missing value for --image}"; shift 2 ;;
             --url)            URL="${2:?missing value for --url}"; shift 2 ;;
             -c|--cpus)        CPUS="${2:?missing value for --cpus}"; shift 2 ;;
@@ -634,6 +717,11 @@ run_main() {
         esac
     done
 
+    if [ "$LIST_DISTROS" -eq 1 ]; then
+        list_distros
+        exit 0
+    fi
+
     if [ "$STOP" -eq 1 ]; then
         do_stop
         exit 0
@@ -656,17 +744,18 @@ run_main() {
         log "$(t '标准输入不是终端，自动切换到后台模式' 'stdin is not a TTY; switching to background mode')"
     fi
 
-    case "$DISTRO" in
-        debian)
-            DEFAULT_URL="https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2"
-            DEFAULT_FORMAT="qcow2"
-            ;;
-        rocky)
-            DEFAULT_URL="https://dl.rockylinux.org/pub/rocky/10/images/x86_64/Rocky-10-GenericCloud-Base.latest.x86_64.qcow2"
-            DEFAULT_FORMAT="qcow2"
-            ;;
-        *) die "$(t '不支持的发行版' 'unsupported distro'): $DISTRO ($(t '使用 debian 或 rocky' 'use debian or rocky'))" ;;
-    esac
+    if ! distro_info "$DISTRO"; then
+        if [ -n "$IMAGE" ] || [ -n "$URL" ]; then
+            DISTRO_LABEL="$DISTRO"
+            DISTRO_ALIASES="$DISTRO"
+            DISTRO_URL=""
+            DISTRO_FORMAT=qcow2
+        else
+            die "$(t '不支持的发行版' 'unsupported distro'): $DISTRO ($(t '使用 --list-distros 查看' 'use --list-distros'))"
+        fi
+    fi
+    DEFAULT_URL="$DISTRO_URL"
+    DEFAULT_FORMAT="$DISTRO_FORMAT"
 
     case "$NET_BACKEND" in passt|user) ;; *) die "$(t '--net-backend 必须是 passt 或 user' '--net-backend must be passt or user')" ;; esac
     case "$ACCEL" in auto|kvm|tcg) ;; *) die "$(t '--accel 必须是 auto、kvm 或 tcg' '--accel must be auto, kvm or tcg')" ;; esac

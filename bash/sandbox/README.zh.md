@@ -84,6 +84,32 @@ ssh -p 8022 dev@127.0.0.1
 
 退出 QEMU：`Ctrl-A X`。
 
+## 支持的发行版
+
+| 别名 | 版本 |
+| --- | --- |
+| `debian`, `debian-13` | Debian 13 |
+| `ubuntu`, `ubuntu-24.04` | Ubuntu 24.04 LTS |
+| `ubuntu-26.04` | Ubuntu 26.04 LTS |
+| `rocky`, `rocky-10` | Rocky Linux 10 |
+| `alma`, `almalinux`, `alma-10` | AlmaLinux 10 |
+| `centos`, `centos-10` | CentOS Stream 10 |
+| `fedora`, `fedora-44` | Fedora 44 |
+| `opensuse`, `leap`, `leap-16.0` | openSUSE Leap 16.0 |
+| `tumbleweed` | openSUSE Tumbleweed |
+| `arch`, `archlinux` | Arch Linux |
+| `alpine`, `alpine-3.23` | Alpine 3.23 |
+
+```bash
+./sandbox.sh run --distro ubuntu --background
+./sandbox.sh run --distro alpine --background
+./sandbox.sh run --list-distros
+```
+
+别名固定到上表版本；需要更新的构建或自定义镜像时用 `--url`，本地镜像仍用 `--image`。
+
+Alpine 云镜像使用无分区磁盘，并且会拒绝被锁定的 cloud-init 账户。生成的 `user-data` 模板已设置 `lock_passwd: false`、`passwd: "*"` 和 `shell: /bin/sh`；使用自定义 `~/user-data.yaml` 时需要加上同样的设置。
+
 ## 磁盘语义
 
 默认每次启动都用基底镜像覆盖 `/data/disk.img`，guest 内的改动会丢失。这适合 sandbox。
@@ -105,6 +131,7 @@ ssh -p 8022 dev@127.0.0.1
 
 ```bash
 ./sandbox.sh run --distro rocky --cpus 4 --mem 8192 --disk 100G
+./sandbox.sh run --list-distros              # 支持的发行版
 ./sandbox.sh run --accel tcg                 # 没有 KVM 时
 ./sandbox.sh run --net-backend user          # passt 不可用时
 ./sandbox.sh run --bind-addr 127.0.0.1       # 只监听本机

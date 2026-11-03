@@ -1,7 +1,9 @@
 #cloud-config
 users:
   - name: dev
-    shell: /bin/bash
+    shell: /bin/sh
+    lock_passwd: false
+    passwd: "*"
     sudo: ALL=(ALL) NOPASSWD:ALL
     ssh_authorized_keys:
       - __SSH_PUBKEY__
