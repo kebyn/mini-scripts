@@ -136,6 +136,9 @@ run_usage_zh() {
       --bind-addr ADDR         转发端口绑定地址（默认 IPv4+IPv6 全部）
       --ssh-user USER          登录提示中的用户（默认 dev）
       --ssh-key PATH           登录提示中的私钥
+      --fqdn FQDN              cloud-init FQDN（默认 kebyn.cc）
+      --profile dev|minimal    预装配置（默认 dev；minimal 跳过开发工具）
+      --provision-url URL      provision.sh 地址（默认 GitHub raw）
       --foreground             管道模式下把 QEMU stdin 接到 /dev/tty
       --background             后台运行并等待 SSH
       --wait-timeout SEC       后台启动超时（默认 600）
@@ -174,6 +177,9 @@ Usage:
       --bind-addr ADDR         Bind forwarded ports to ADDR (default: all IPv4+IPv6)
       --ssh-user USER          User shown in the login hint (default: dev)
       --ssh-key PATH           Private key shown in the login hint
+      --fqdn FQDN              cloud-init FQDN (default: kebyn.cc)
+      --profile dev|minimal    Provisioning profile (default: dev; minimal skips dev tools)
+      --provision-url URL      provision.sh URL (default: GitHub raw)
       --foreground             Attach QEMU stdin to /dev/tty in pipe mode
       --background             Run QEMU as a daemon and wait for SSH
       --wait-timeout SEC       Background startup timeout (default: 600)
@@ -232,10 +238,14 @@ fi
 
 # Keep this in sync with user-data.yaml.tmpl. It is the fallback for
 #   curl .../sandbox.sh | bash
-readonly EMBEDDED_USER_DATA='#cloud-config
+write_embedded_user_data() {
+    cat <<'EOF'
+## template: jinja
+#cloud-config
+{% set sandbox_shell = '/bin/sh' if v1.distro == 'alpine' else '/bin/bash' %}
 users:
   - name: dev
-    shell: /bin/sh
+    shell: "{{ sandbox_shell }}"
     lock_passwd: false
     passwd: "*"
     sudo: ALL=(ALL) NOPASSWD:ALL
@@ -243,7 +253,49 @@ users:
       - __SSH_PUBKEY__
 ssh_pwauth: false
 disable_root: true
-package_update: false'
+package_update: false
+
+hostname: local
+fqdn: "{{ ds.meta_data.sandbox.fqdn }}"
+preserve_hostname: false
+create_hostname_file: true
+prefer_fqdn_over_hostname: false
+manage_etc_hosts: true
+
+write_files:
+  - path: /etc/ssh/sshd_config.d/99-sandbox-hardening.conf
+    permissions: '0644'
+    content: |
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PubkeyAuthentication yes
+      PermitRootLogin no
+  - path: /etc/sysctl.d/99-sandbox.conf
+    permissions: '0644'
+    content: |
+      vm.swappiness = 10
+      vm.max_map_count = 262144
+      fs.inotify.max_user_watches = 524288
+      fs.inotify.max_user_instances = 512
+      net.core.somaxconn = 65535
+      net.ipv4.ip_forward = 1
+  - path: /etc/modules-load.d/sandbox.conf
+    permissions: '0644'
+    content: |
+      br_netfilter
+      overlay
+  - path: /etc/sandbox-profile
+    permissions: '0644'
+    content: "{{ ds.meta_data.sandbox.profile }}"
+# __PROVISION_FILE__
+
+runcmd:
+  - [ "{{ sandbox_shell }}", "-c", 'if command -v systemctl >/dev/null 2>&1; then systemctl restart systemd-modules-load.service 2>/dev/null || true; sysctl --system 2>/dev/null || true; else for m in $(cat /etc/modules-load.d/sandbox.conf 2>/dev/null); do modprobe "$m" 2>/dev/null || true; done; sysctl -p /etc/sysctl.d/99-sandbox.conf 2>/dev/null || true; fi' ]
+  - [ "{{ sandbox_shell }}", "-c", 'sysctl -w net.bridge.bridge-nf-call-iptables=1 2>/dev/null || true; sysctl -w net.bridge.bridge-nf-call-ip6tables=1 2>/dev/null || true; sysctl -w net.core.default_qdisc=fq 2>/dev/null || true; sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null || true' ]
+  - [ "{{ sandbox_shell }}", "-c", '{% if v1.distro == "alpine" %}rc-service sshd reload{% else %}systemctl reload ssh 2>/dev/null || systemctl reload sshd{% endif %}' ]
+  - [ "{{ sandbox_shell }}", "-c", 'if [ "$(cat /etc/sandbox-profile 2>/dev/null)" = dev ]; then {{ sandbox_shell }} /usr/local/sbin/sandbox-provision; fi' ]
+EOF
+}
 
 # ---------------------------------------------------------------------------
 # Shared helpers.
@@ -642,6 +694,63 @@ list_distros() {
     done
 }
 
+validate_user_data() {
+    local file="$1" tmpd
+    if ! command -v cloud-init >/dev/null 2>&1; then
+        return 0
+    fi
+    if head -n 1 "$file" 2>/dev/null | grep -q '## template: jinja'; then
+        if ! command -v python3 >/dev/null 2>&1 \
+            || ! python3 -c 'import jinja2' >/dev/null 2>&1; then
+            warn "$(t 'Jinja2 不可用，跳过 user-data schema 校验' 'Jinja2 unavailable; skipping user-data schema validation')"
+            return 0
+        fi
+        tmpd="$(mktemp -d)"
+        if ! python3 - "$file" "$tmpd" "$FQDN" "$PROFILE" "$PROVISION_URL" <<'PY'
+import pathlib
+import sys
+
+import jinja2
+
+src, outdir, fqdn, profile, url = sys.argv[1:6]
+text = pathlib.Path(src).read_text()
+env = jinja2.Environment(undefined=jinja2.StrictUndefined)
+for distro in ("debian", "alpine"):
+    ctx = {
+        "v1": {"distro": distro},
+        "ds": {
+            "meta_data": {
+                "sandbox": {
+                    "fqdn": fqdn,
+                    "profile": profile,
+                    "provision_url": url,
+                }
+            }
+        },
+    }
+    rendered = env.from_string(text).render(**ctx)
+    lines = rendered.splitlines()
+    if lines and lines[0].startswith("## template: jinja"):
+        lines = lines[1:]
+    pathlib.Path(outdir, f"user-data-{distro}.yaml").write_text("\n".join(lines) + "\n")
+PY
+        then
+            rm -rf "$tmpd"
+            die "$(t 'user-data 模板渲染失败' 'user-data template rendering failed'): $file"
+        fi
+        if ! cloud-init schema -c "$tmpd/user-data-debian.yaml" >/dev/null \
+            || ! cloud-init schema -c "$tmpd/user-data-alpine.yaml" >/dev/null; then
+            rm -rf "$tmpd"
+            die "$(t 'user-data 未通过 cloud-init schema 校验' 'user-data failed cloud-init schema validation'): $USER_DATA"
+        fi
+        rm -rf "$tmpd"
+    else
+        if ! cloud-init schema -c "$file" >/dev/null; then
+            die "$(t 'user-data 未通过 cloud-init schema 校验' 'user-data failed cloud-init schema validation'): $USER_DATA"
+        fi
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # run
 # ---------------------------------------------------------------------------
@@ -669,6 +778,9 @@ run_main() {
     BIND_ADDR="${VM_BIND_ADDR:-}"
     SSH_USER="${VM_SSH_USER:-dev}"
     SSH_KEY="${VM_SSH_KEY:-}"
+    FQDN="${VM_FQDN:-kebyn.cc}"
+    PROFILE="${VM_PROFILE:-dev}"
+    PROVISION_URL="${VM_PROVISION_URL:-https://raw.githubusercontent.com/kebyn/sandbox/main/provision.sh}"
     FOREGROUND=0
     TTY_STDIN=0
     BACKGROUND=0
@@ -703,6 +815,9 @@ run_main() {
             --bind-addr)      BIND_ADDR="${2:?missing value for --bind-addr}"; shift 2 ;;
             --ssh-user)       SSH_USER="${2:?missing value for --ssh-user}"; shift 2 ;;
             --ssh-key)        SSH_KEY="${2:?missing value for --ssh-key}"; shift 2 ;;
+            --fqdn)           FQDN="${2:?missing value for --fqdn}"; shift 2 ;;
+            --profile)        PROFILE="${2:?missing value for --profile}"; shift 2 ;;
+            --provision-url)  PROVISION_URL="${2:?missing value for --provision-url}"; shift 2 ;;
             --foreground)     FOREGROUND=1; shift ;;
             --background)     BACKGROUND=1; shift ;;
             --wait-timeout)   WAIT_TIMEOUT="${2:?missing value for --wait-timeout}"; shift 2 ;;
@@ -742,6 +857,17 @@ run_main() {
     if [ "$BACKGROUND" -eq 0 ] && [ "$DRY_RUN" -eq 0 ] && [ "$FOREGROUND" -eq 0 ] && [ ! -t 0 ]; then
         BACKGROUND=1
         log "$(t '标准输入不是终端，自动切换到后台模式' 'stdin is not a TTY; switching to background mode')"
+    fi
+
+    case "$PROFILE" in
+        dev|minimal) ;;
+        *) die "$(t '--profile 必须是 dev 或 minimal' '--profile must be dev or minimal')" ;;
+    esac
+    if [ -z "$FQDN" ]; then
+        die "$(t '--fqdn 不能为空' '--fqdn must not be empty')"
+    fi
+    if [ "$PROFILE" = dev ] && [ -z "$PROVISION_URL" ]; then
+        die "$(t 'dev profile 需要 --provision-url' 'dev profile requires --provision-url')"
     fi
 
     if ! distro_info "$DISTRO"; then
@@ -1091,15 +1217,58 @@ run_main() {
         template_tmp=0
         if [ ! -f "$template" ]; then
             template="$(mktemp)"
-            printf '%s\n' "$EMBEDDED_USER_DATA" > "$template"
+            write_embedded_user_data > "$template"
             template_tmp=1
         fi
+
+        provision_file="$SCRIPT_DIR/provision.sh"
+        provision_tmp=0
+        provision_block_tmp=0
+        if [ "$PROFILE" = dev ]; then
+            if [ ! -f "$provision_file" ]; then
+                provision_file="$(mktemp)"
+                if ! curl -fsSL --retry 3 "$PROVISION_URL" -o "$provision_file"; then
+                    rm -f "$provision_file"
+                    if [ "$template_tmp" -eq 1 ]; then
+                        rm -f "$template"
+                    fi
+                    die "$(t '无法下载 provision.sh' 'cannot download provision.sh'): $PROVISION_URL"
+                fi
+                provision_tmp=1
+            fi
+            provision_block="$(mktemp)"
+            provision_block_tmp=1
+            {
+                printf '  - path: /usr/local/sbin/sandbox-provision\n'
+                printf "    permissions: '0755'\n"
+                printf '    content: |\n'
+                sed 's/^/      /' "$provision_file"
+            } > "$provision_block"
+        else
+            provision_block=/dev/null
+        fi
+
+        rendered="$(mktemp)"
         tmp="$(mktemp)"
-        sed "s|__SSH_PUBKEY__|${pub}|g" "$template" > "$tmp"
+        sed "s|__SSH_PUBKEY__|${pub}|g" "$template" > "$rendered"
+        awk -v block="$provision_block" '
+            /^# __PROVISION_FILE__$/ {
+                while ((getline line < block) > 0) print line
+                close(block)
+                next
+            }
+            { print }
+        ' "$rendered" > "$tmp"
         install -m 600 "$tmp" "$USER_DATA"
-        rm -f "$tmp"
+        rm -f "$tmp" "$rendered"
+        if [ "$provision_block_tmp" -eq 1 ]; then
+            rm -f "$provision_block"
+        fi
         if [ "$template_tmp" -eq 1 ]; then
             rm -f "$template"
+        fi
+        if [ "$provision_tmp" -eq 1 ]; then
+            rm -f "$provision_file"
         fi
         if [ -z "$SSH_KEY" ]; then
             SSH_KEY="$VM_DIR/id_ed25519"
@@ -1112,15 +1281,13 @@ run_main() {
         fi
     fi
 
-    if command -v cloud-init >/dev/null 2>&1; then
-        if ! cloud-init schema -c "$USER_DATA" >/dev/null; then
-            die "$(t 'user-data 未通过 cloud-init schema 校验' 'user-data failed cloud-init schema validation'): $USER_DATA"
-        fi
-    fi
+    validate_user_data "$USER_DATA"
 
-    hash="$(sha256sum "$USER_DATA" | awk '{print substr($1, 1, 12)}')"
+    hash="$(printf '%s\n%s\n%s\n%s\n' "$(cat "$USER_DATA")" "$FQDN" "$PROFILE" "$PROVISION_URL" \
+        | sha256sum | awk '{print substr($1, 1, 12)}')"
     meta_tmp="$(mktemp)"
-    printf 'instance-id: iid-%s\nlocal-hostname: cloud-vm\n' "$hash" > "$meta_tmp"
+    printf 'instance-id: iid-%s\nlocal-hostname: local\nsandbox:\n  fqdn: "%s"\n  profile: "%s"\n  provision_url: "%s"\n' \
+        "$hash" "$FQDN" "$PROFILE" "$PROVISION_URL" > "$meta_tmp"
     if ! cmp -s "$meta_tmp" "$VM_DIR/meta-data" 2>/dev/null; then
         mv "$meta_tmp" "$VM_DIR/meta-data"
     else

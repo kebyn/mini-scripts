@@ -1,7 +1,9 @@
+## template: jinja
 #cloud-config
+{% set sandbox_shell = '/bin/sh' if v1.distro == 'alpine' else '/bin/bash' %}
 users:
   - name: dev
-    shell: /bin/sh
+    shell: "{{ sandbox_shell }}"
     lock_passwd: false
     passwd: "*"
     sudo: ALL=(ALL) NOPASSWD:ALL
@@ -10,3 +12,43 @@ users:
 ssh_pwauth: false
 disable_root: true
 package_update: false
+
+hostname: local
+fqdn: "{{ ds.meta_data.sandbox.fqdn }}"
+preserve_hostname: false
+create_hostname_file: true
+prefer_fqdn_over_hostname: false
+manage_etc_hosts: true
+
+write_files:
+  - path: /etc/ssh/sshd_config.d/99-sandbox-hardening.conf
+    permissions: '0644'
+    content: |
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PubkeyAuthentication yes
+      PermitRootLogin no
+  - path: /etc/sysctl.d/99-sandbox.conf
+    permissions: '0644'
+    content: |
+      vm.swappiness = 10
+      vm.max_map_count = 262144
+      fs.inotify.max_user_watches = 524288
+      fs.inotify.max_user_instances = 512
+      net.core.somaxconn = 65535
+      net.ipv4.ip_forward = 1
+  - path: /etc/modules-load.d/sandbox.conf
+    permissions: '0644'
+    content: |
+      br_netfilter
+      overlay
+  - path: /etc/sandbox-profile
+    permissions: '0644'
+    content: "{{ ds.meta_data.sandbox.profile }}"
+# __PROVISION_FILE__
+
+runcmd:
+  - [ "{{ sandbox_shell }}", "-c", 'if command -v systemctl >/dev/null 2>&1; then systemctl restart systemd-modules-load.service 2>/dev/null || true; sysctl --system 2>/dev/null || true; else for m in $(cat /etc/modules-load.d/sandbox.conf 2>/dev/null); do modprobe "$m" 2>/dev/null || true; done; sysctl -p /etc/sysctl.d/99-sandbox.conf 2>/dev/null || true; fi' ]
+  - [ "{{ sandbox_shell }}", "-c", 'sysctl -w net.bridge.bridge-nf-call-iptables=1 2>/dev/null || true; sysctl -w net.bridge.bridge-nf-call-ip6tables=1 2>/dev/null || true; sysctl -w net.core.default_qdisc=fq 2>/dev/null || true; sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null || true' ]
+  - [ "{{ sandbox_shell }}", "-c", '{% if v1.distro == "alpine" %}rc-service sshd reload{% else %}systemctl reload ssh 2>/dev/null || systemctl reload sshd{% endif %}' ]
+  - [ "{{ sandbox_shell }}", "-c", 'if [ "$(cat /etc/sandbox-profile 2>/dev/null)" = dev ]; then {{ sandbox_shell }} /usr/local/sbin/sandbox-provision; fi' ]

@@ -7,6 +7,7 @@ Launch Debian 13 / Rocky 10 cloud images with QEMU, KVM and passt.
 ## Files
 
 - `sandbox.sh`: the single implementation. Subcommands: `bootstrap`, `run`, `stop`; supports Chinese/English output and `curl | bash`.
+- `provision.sh`: distro-aware guest provisioning (Docker, uv, Node.js LTS, common tools). It is embedded into the cloud-init seed.
 - `user-data.yaml.tmpl`: used to generate `~/user-data.yaml` when it is missing. `sandbox.sh` embeds the same template for pipe mode.
 - `.gitignore`: images, disks, seeds, logs and keys stay out of the repository.
 
@@ -67,6 +68,19 @@ VM_LANG=zh ./sandbox.sh run --dry-run
 - RAM: `min(8192, MemAvailable - 1024)` MiB
 - Disk: 90% of free space on the filesystem containing `/data`
 - Ports: SSH `8022`, HTTP `8080`, HTTPS `8443`; all IPv4 and IPv6 addresses by default
+- Hostname: `local`; FQDN from `--fqdn` (default `kebyn.cc`)
+
+## Default guest environment
+
+The generated user-data is a cloud-init Jinja template:
+
+- Alpine gets `dev` shell `/bin/sh`; other distros get `/bin/bash`.
+- SSH password login and keyboard-interactive auth are disabled; only keys are accepted.
+- sysctl tuning is applied through `/etc/sysctl.d/99-sandbox.conf`, with `br_netfilter` and `overlay` in `/etc/modules-load.d/sandbox.conf`.
+- `--profile dev` (default) installs Docker Engine + Compose, uv, Node.js LTS, git, curl, jq and build tools. First boot takes several minutes; the marker is `/var/log/sandbox-provision.done` and the log is `/var/log/sandbox-provision.log`.
+- `--profile minimal` keeps SSH hardening, hostname and sysctl, and skips Docker/Node/uv.
+
+`--provision-url` is only used when a local `provision.sh` is unavailable (for example in curl mode); it fetches the script on the host and embeds it in the seed. On RHEL-family images Docker CE may install a newer kernel; provisioning also installs the running kernel's extra modules so Docker can start immediately.
 
 Log in:
 
@@ -108,7 +122,7 @@ Quit QEMU with `Ctrl-A X`.
 
 Aliases are pinned to the versions above. Use `--url` for a newer build or a custom image; `--image` still accepts a local qcow2/raw image.
 
-Alpine's cloud image uses a partitionless disk and rejects a locked cloud-init account. The generated `user-data` template sets `lock_passwd: false`, `passwd: "*"` and `shell: /bin/sh`; add the same settings if you use a custom `~/user-data.yaml`.
+Alpine's cloud image uses a partitionless disk and rejects a locked cloud-init account. The generated template sets `lock_passwd: false`, `passwd: "*"` and uses Jinja to select `/bin/sh` on Alpine and `/bin/bash` elsewhere; add the same settings if you use a custom `~/user-data.yaml`.
 
 ## Disk behavior
 
@@ -135,6 +149,8 @@ Force a fresh base image download (the work disk still follows `--keep-disk`):
 ./sandbox.sh run --accel tcg                 # no KVM
 ./sandbox.sh run --net-backend user          # passt unavailable
 ./sandbox.sh run --bind-addr 127.0.0.1       # localhost only
+./sandbox.sh run --fqdn local.kebyn.cc       # custom FQDN
+./sandbox.sh run --profile minimal           # skip Docker/Node/uv
 ./sandbox.sh run --foreground                # foreground console in pipe mode
 ./sandbox.sh run --dry-run                   # print the QEMU command
 ./sandbox.sh run --help                      # all options

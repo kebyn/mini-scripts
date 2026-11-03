@@ -7,6 +7,7 @@
 ## 文件
 
 - `sandbox.sh`：唯一实现。子命令 `bootstrap`、`run`、`stop`，支持中文/英文和 `curl | bash`。
+- `provision.sh`：按发行版安装 Docker、uv、Node.js LTS 和常用工具，会嵌入 cloud-init seed。
 - `user-data.yaml.tmpl`：`~/user-data.yaml` 不存在时用于生成默认配置；`sandbox.sh` 内有同样的内嵌副本，供管道模式使用。
 - `.gitignore`：镜像、磁盘、seed、日志和密钥不进入仓库。
 
@@ -67,6 +68,19 @@ VM_LANG=zh ./sandbox.sh run --dry-run
 - 内存：`min(8192, MemAvailable - 1024)` MiB
 - 磁盘：`/data` 所在文件系统剩余空间的 90%
 - 端口：SSH `8022`、HTTP `8080`、HTTPS `8443`，默认监听 IPv4 和 IPv6 的所有地址
+- 主机名：`local`；FQDN 由 `--fqdn` 指定（默认 `kebyn.cc`）
+
+## 默认 guest 环境
+
+生成的 user-data 使用 cloud-init Jinja：
+
+- Alpine 的 `dev` 用户 shell 为 `/bin/sh`，其它发行版为 `/bin/bash`。
+- 关闭 SSH 密码登录和 keyboard-interactive，仅允许公钥。
+- 通过 `/etc/sysctl.d/99-sandbox.conf` 调优内核参数，`/etc/modules-load.d/sandbox.conf` 加载 `br_netfilter` 和 `overlay`。
+- `--profile dev`（默认）安装 Docker Engine + Compose、uv、Node.js LTS、git、curl、jq 和编译工具。首次启动需要几分钟；完成标记是 `/var/log/sandbox-provision.done`，日志是 `/var/log/sandbox-provision.log`。
+- `--profile minimal` 保留 SSH 加固、主机名和 sysctl，跳过 Docker/Node/uv。
+
+`--provision-url` 仅在本地没有 `provision.sh` 时使用（例如 curl 模式），由宿主机下载后嵌入 seed。RHEL 系镜像的 Docker CE 可能安装更新的内核；provision 脚本会同时安装当前运行内核的额外模块，保证 Docker 能立即启动。
 
 登录：
 
@@ -108,7 +122,7 @@ ssh -p 8022 dev@127.0.0.1
 
 别名固定到上表版本；需要更新的构建或自定义镜像时用 `--url`，本地镜像仍用 `--image`。
 
-Alpine 云镜像使用无分区磁盘，并且会拒绝被锁定的 cloud-init 账户。生成的 `user-data` 模板已设置 `lock_passwd: false`、`passwd: "*"` 和 `shell: /bin/sh`；使用自定义 `~/user-data.yaml` 时需要加上同样的设置。
+Alpine 云镜像使用无分区磁盘，并且会拒绝被锁定的 cloud-init 账户。生成的模板已设置 `lock_passwd: false`、`passwd: "*"`，并通过 Jinja 在 Alpine 上使用 `/bin/sh`、其它发行版使用 `/bin/bash`；使用自定义 `~/user-data.yaml` 时需要加上同样的设置。
 
 ## 磁盘语义
 
@@ -135,6 +149,8 @@ Alpine 云镜像使用无分区磁盘，并且会拒绝被锁定的 cloud-init �
 ./sandbox.sh run --accel tcg                 # 没有 KVM 时
 ./sandbox.sh run --net-backend user          # passt 不可用时
 ./sandbox.sh run --bind-addr 127.0.0.1       # 只监听本机
+./sandbox.sh run --fqdn local.kebyn.cc       # 自定义 FQDN
+./sandbox.sh run --profile minimal           # 跳过 Docker/Node/uv
 ./sandbox.sh run --foreground                # 管道模式前台串口
 ./sandbox.sh run --dry-run                   # 只打印 QEMU 命令
 ./sandbox.sh run --help                      # 全部选项
