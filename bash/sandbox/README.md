@@ -7,8 +7,7 @@ Launch Debian 13 / Rocky 10 cloud images with QEMU, KVM and passt.
 ## Files
 
 - `sandbox.sh`: the single implementation. Subcommands: `bootstrap`, `run`, `stop`; supports Chinese/English output and `curl | bash`.
-- `provision.sh`: distro-aware guest provisioning (Docker, uv, Node.js LTS, common tools). It is embedded into the cloud-init seed.
-- `user-data.yaml.tmpl`: used to generate `~/user-data.yaml` when it is missing. `sandbox.sh` embeds the same template for pipe mode.
+- `user-data.yaml.tmpl`: used to generate `~/user-data.yaml` when it is missing. It contains the cloud-init Jinja logic and package lists. `sandbox.sh` embeds the same template for pipe mode.
 - `.gitignore`: images, disks, seeds, logs and keys stay out of the repository.
 
 ## Quick start
@@ -77,10 +76,10 @@ The generated user-data is a cloud-init Jinja template:
 - Alpine gets `dev` shell `/bin/sh`; other distros get `/bin/bash`.
 - SSH password login and keyboard-interactive auth are disabled; only keys are accepted.
 - sysctl tuning is applied through `/etc/sysctl.d/99-sandbox.conf`, with `br_netfilter` and `overlay` in `/etc/modules-load.d/sandbox.conf`.
-- `--profile dev` (default) installs Docker Engine + Compose, uv, Node.js LTS, git, curl, jq and build tools. First boot takes several minutes; the marker is `/var/log/sandbox-provision.done` and the log is `/var/log/sandbox-provision.log`.
-- `--profile minimal` keeps SSH hardening, hostname and sysctl, and skips Docker/Node/uv.
-
-`--provision-url` is only used when a local `provision.sh` is unavailable (for example in curl mode); it fetches the script on the host and embeds it in the seed. On RHEL-family images Docker CE may install a newer kernel; provisioning also installs the running kernel's extra modules so Docker can start immediately.
+- `--profile dev` (default) installs Docker, Node.js and common tools through cloud-init `packages`; `runcmd` only starts services, adds `dev` to the docker group, applies sysctl/modules, and installs uv where no distro package exists.
+- `--profile minimal` keeps SSH hardening, hostname and sysctl, and skips `packages` and dev-related `runcmd`.
+- Node.js comes from the distro repository (Arch uses `nodejs-lts`). On RHEL-family images Docker CE is added via `yum_repos` and may install a newer kernel; a small `runcmd` step installs the running kernel's extra modules so Docker starts immediately.
+- The completion marker is `/var/log/sandbox-provision.done`; cloud-init output is in `/var/log/cloud-init-output.log`.
 
 Log in:
 

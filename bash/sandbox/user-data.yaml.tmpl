@@ -1,6 +1,12 @@
 ## template: jinja
 #cloud-config
-{% set sandbox_shell = '/bin/sh' if v1.distro == 'alpine' else '/bin/bash' %}
+{% set profile = ds.meta_data.sandbox.profile %}
+{% set is_alpine = v1.distro == 'alpine' %}
+{% set is_debian = v1.distro in ['debian', 'ubuntu'] %}
+{% set is_rhel = v1.distro in ['rhel', 'centos', 'rocky', 'almalinux', 'fedora'] %}
+{% set is_suse = v1.distro in ['opensuse', 'opensuse-leap', 'opensuse-tumbleweed', 'sles', 'suse'] %}
+{% set is_arch = v1.distro == 'arch' %}
+{% set sandbox_shell = '/bin/sh' if is_alpine else '/bin/bash' %}
 users:
   - name: dev
     shell: "{{ sandbox_shell }}"
@@ -11,7 +17,7 @@ users:
       - __SSH_PUBKEY__
 ssh_pwauth: false
 disable_root: true
-package_update: false
+package_update: {% if profile == 'dev' %}true{% else %}false{% endif %}
 
 hostname: local
 fqdn: "{{ ds.meta_data.sandbox.fqdn }}"
@@ -19,6 +25,97 @@ preserve_hostname: false
 create_hostname_file: true
 prefer_fqdn_over_hostname: false
 manage_etc_hosts: true
+
+{% if profile == 'dev' and is_rhel %}
+yum_repos:
+  docker-ce-stable:
+    name: Docker CE Stable - $basearch
+    baseurl: "{% if v1.distro == 'fedora' %}https://download.docker.com/linux/fedora/$releasever/$basearch/stable{% else %}https://download.docker.com/linux/centos/$releasever/$basearch/stable{% endif %}"
+    enabled: true
+    gpgcheck: true
+    gpgkey: "{% if v1.distro == 'fedora' %}https://download.docker.com/linux/fedora/gpg{% else %}https://download.docker.com/linux/centos/gpg{% endif %}"
+{% endif %}
+
+{% if profile == 'dev' %}
+packages:
+{% if is_debian %}
+  - ca-certificates
+  - curl
+  - git
+  - jq
+  - build-essential
+  - python3
+  - python3-pip
+  - docker.io
+{% if v1.distro == 'debian' %}
+  - docker-compose
+{% else %}
+  - docker-compose-v2
+{% endif %}
+  - nodejs
+  - npm
+{% elif is_rhel %}
+  - ca-certificates
+  - curl
+  - git
+  - jq
+  - gcc
+  - gcc-c++
+  - make
+  - python3
+  - python3-pip
+  - dnf-plugins-core
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-buildx-plugin
+  - docker-compose-plugin
+  - nodejs
+  - npm
+{% elif is_suse %}
+  - ca-certificates
+  - curl
+  - git
+  - jq
+  - gcc
+  - gcc-c++
+  - make
+  - python3
+  - python3-pip
+  - docker
+  - docker-compose
+  - nodejs
+  - npm
+{% elif is_arch %}
+  - ca-certificates
+  - curl
+  - git
+  - jq
+  - sudo
+  - base-devel
+  - python
+  - python-pip
+  - docker
+  - docker-compose
+  - nodejs-lts
+  - npm
+  - uv
+{% elif is_alpine %}
+  - ca-certificates
+  - curl
+  - git
+  - jq
+  - sudo
+  - build-base
+  - python3
+  - py3-pip
+  - docker
+  - docker-cli-compose
+  - nodejs
+  - npm
+  - uv
+{% endif %}
+{% endif %}
 
 write_files:
   - path: /etc/ssh/sshd_config.d/99-sandbox-hardening.conf
@@ -44,11 +141,25 @@ write_files:
       overlay
   - path: /etc/sandbox-profile
     permissions: '0644'
-    content: "{{ ds.meta_data.sandbox.profile }}"
-# __PROVISION_FILE__
+    content: "{{ profile }}"
 
 runcmd:
   - [ "{{ sandbox_shell }}", "-c", 'if command -v systemctl >/dev/null 2>&1; then systemctl restart systemd-modules-load.service 2>/dev/null || true; sysctl --system 2>/dev/null || true; else for m in $(cat /etc/modules-load.d/sandbox.conf 2>/dev/null); do modprobe "$m" 2>/dev/null || true; done; sysctl -p /etc/sysctl.d/99-sandbox.conf 2>/dev/null || true; fi' ]
   - [ "{{ sandbox_shell }}", "-c", 'sysctl -w net.bridge.bridge-nf-call-iptables=1 2>/dev/null || true; sysctl -w net.bridge.bridge-nf-call-ip6tables=1 2>/dev/null || true; sysctl -w net.core.default_qdisc=fq 2>/dev/null || true; sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null || true' ]
-  - [ "{{ sandbox_shell }}", "-c", '{% if v1.distro == "alpine" %}rc-service sshd reload{% else %}systemctl reload ssh 2>/dev/null || systemctl reload sshd{% endif %}' ]
-  - [ "{{ sandbox_shell }}", "-c", 'if [ "$(cat /etc/sandbox-profile 2>/dev/null)" = dev ]; then {{ sandbox_shell }} /usr/local/sbin/sandbox-provision; fi' ]
+  - [ "{{ sandbox_shell }}", "-c", '{% if is_alpine %}rc-service sshd reload{% else %}systemctl reload ssh 2>/dev/null || systemctl reload sshd{% endif %}' ]
+{% if profile == 'dev' %}
+{% if is_rhel %}
+  - [ "{{ sandbox_shell }}", "-c", 'dnf install -y "kernel-modules-extra-$(uname -r)" "kernel-modules-$(uname -r)" || true; modprobe xt_addrtype 2>/dev/null || true; modprobe iptable_nat 2>/dev/null || true' ]
+{% endif %}
+{% if is_alpine %}
+  - [ "{{ sandbox_shell }}", "-c", 'sed -i "s/^#rc_cgroup_mode=\"unified\"/rc_cgroup_mode=\"unified\"/" /etc/rc.conf 2>/dev/null || true; rm -f /run/openrc/starting/cgroups /run/openrc/stopping/cgroups; rc-update add cgroups default 2>/dev/null || true; service cgroups start 2>/dev/null || true; grep -q " /sys/fs/cgroup " /proc/mounts || { mkdir -p /sys/fs/cgroup; mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null || true; }; rc-update add docker default 2>/dev/null || true; service docker start; addgroup dev docker 2>/dev/null || true' ]
+{% elif is_arch or is_suse or is_debian or is_rhel %}
+  - [ "{{ sandbox_shell }}", "-c", 'systemctl enable --now docker; usermod -aG docker dev' ]
+{% else %}
+  - [ "{{ sandbox_shell }}", "-c", 'echo "unsupported distro: {{ v1.distro }}"; exit 1' ]
+{% endif %}
+{% if not is_arch and not is_alpine %}
+  - [ "{{ sandbox_shell }}", "-c", 'curl -LsSf --retry 3 https://astral.sh/uv/install.sh -o /tmp/uv-install.sh && UV_INSTALL_DIR=/usr/local/bin sh /tmp/uv-install.sh || sh /tmp/uv-install.sh || true; [ -x /root/.local/bin/uv ] && ln -sf /root/.local/bin/uv /usr/local/bin/uv || true' ]
+{% endif %}
+  - [ "{{ sandbox_shell }}", "-c", 'for i in 1 2 3 4 5; do docker info >/dev/null 2>&1 && break; sleep 2; done; docker --version; docker compose version || true; node --version; npm --version; uv --version; docker info >/dev/null 2>&1; touch /var/log/sandbox-provision.done' ]
+{% endif %}

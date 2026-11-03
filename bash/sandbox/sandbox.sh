@@ -138,7 +138,6 @@ run_usage_zh() {
       --ssh-key PATH           登录提示中的私钥
       --fqdn FQDN              cloud-init FQDN（默认 kebyn.cc）
       --profile dev|minimal    预装配置（默认 dev；minimal 跳过开发工具）
-      --provision-url URL      provision.sh 地址（默认 GitHub raw）
       --foreground             管道模式下把 QEMU stdin 接到 /dev/tty
       --background             后台运行并等待 SSH
       --wait-timeout SEC       后台启动超时（默认 600）
@@ -179,7 +178,6 @@ Usage:
       --ssh-key PATH           Private key shown in the login hint
       --fqdn FQDN              cloud-init FQDN (default: kebyn.cc)
       --profile dev|minimal    Provisioning profile (default: dev; minimal skips dev tools)
-      --provision-url URL      provision.sh URL (default: GitHub raw)
       --foreground             Attach QEMU stdin to /dev/tty in pipe mode
       --background             Run QEMU as a daemon and wait for SSH
       --wait-timeout SEC       Background startup timeout (default: 600)
@@ -242,7 +240,13 @@ write_embedded_user_data() {
     cat <<'EOF'
 ## template: jinja
 #cloud-config
-{% set sandbox_shell = '/bin/sh' if v1.distro == 'alpine' else '/bin/bash' %}
+{% set profile = ds.meta_data.sandbox.profile %}
+{% set is_alpine = v1.distro == 'alpine' %}
+{% set is_debian = v1.distro in ['debian', 'ubuntu'] %}
+{% set is_rhel = v1.distro in ['rhel', 'centos', 'rocky', 'almalinux', 'fedora'] %}
+{% set is_suse = v1.distro in ['opensuse', 'opensuse-leap', 'opensuse-tumbleweed', 'sles', 'suse'] %}
+{% set is_arch = v1.distro == 'arch' %}
+{% set sandbox_shell = '/bin/sh' if is_alpine else '/bin/bash' %}
 users:
   - name: dev
     shell: "{{ sandbox_shell }}"
@@ -253,7 +257,7 @@ users:
       - __SSH_PUBKEY__
 ssh_pwauth: false
 disable_root: true
-package_update: false
+package_update: {% if profile == 'dev' %}true{% else %}false{% endif %}
 
 hostname: local
 fqdn: "{{ ds.meta_data.sandbox.fqdn }}"
@@ -261,6 +265,97 @@ preserve_hostname: false
 create_hostname_file: true
 prefer_fqdn_over_hostname: false
 manage_etc_hosts: true
+
+{% if profile == 'dev' and is_rhel %}
+yum_repos:
+  docker-ce-stable:
+    name: Docker CE Stable - $basearch
+    baseurl: "{% if v1.distro == 'fedora' %}https://download.docker.com/linux/fedora/$releasever/$basearch/stable{% else %}https://download.docker.com/linux/centos/$releasever/$basearch/stable{% endif %}"
+    enabled: true
+    gpgcheck: true
+    gpgkey: "{% if v1.distro == 'fedora' %}https://download.docker.com/linux/fedora/gpg{% else %}https://download.docker.com/linux/centos/gpg{% endif %}"
+{% endif %}
+
+{% if profile == 'dev' %}
+packages:
+{% if is_debian %}
+  - ca-certificates
+  - curl
+  - git
+  - jq
+  - build-essential
+  - python3
+  - python3-pip
+  - docker.io
+{% if v1.distro == 'debian' %}
+  - docker-compose
+{% else %}
+  - docker-compose-v2
+{% endif %}
+  - nodejs
+  - npm
+{% elif is_rhel %}
+  - ca-certificates
+  - curl
+  - git
+  - jq
+  - gcc
+  - gcc-c++
+  - make
+  - python3
+  - python3-pip
+  - dnf-plugins-core
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-buildx-plugin
+  - docker-compose-plugin
+  - nodejs
+  - npm
+{% elif is_suse %}
+  - ca-certificates
+  - curl
+  - git
+  - jq
+  - gcc
+  - gcc-c++
+  - make
+  - python3
+  - python3-pip
+  - docker
+  - docker-compose
+  - nodejs
+  - npm
+{% elif is_arch %}
+  - ca-certificates
+  - curl
+  - git
+  - jq
+  - sudo
+  - base-devel
+  - python
+  - python-pip
+  - docker
+  - docker-compose
+  - nodejs-lts
+  - npm
+  - uv
+{% elif is_alpine %}
+  - ca-certificates
+  - curl
+  - git
+  - jq
+  - sudo
+  - build-base
+  - python3
+  - py3-pip
+  - docker
+  - docker-cli-compose
+  - nodejs
+  - npm
+  - uv
+{% endif %}
+{% endif %}
 
 write_files:
   - path: /etc/ssh/sshd_config.d/99-sandbox-hardening.conf
@@ -286,14 +381,28 @@ write_files:
       overlay
   - path: /etc/sandbox-profile
     permissions: '0644'
-    content: "{{ ds.meta_data.sandbox.profile }}"
-# __PROVISION_FILE__
+    content: "{{ profile }}"
 
 runcmd:
   - [ "{{ sandbox_shell }}", "-c", 'if command -v systemctl >/dev/null 2>&1; then systemctl restart systemd-modules-load.service 2>/dev/null || true; sysctl --system 2>/dev/null || true; else for m in $(cat /etc/modules-load.d/sandbox.conf 2>/dev/null); do modprobe "$m" 2>/dev/null || true; done; sysctl -p /etc/sysctl.d/99-sandbox.conf 2>/dev/null || true; fi' ]
   - [ "{{ sandbox_shell }}", "-c", 'sysctl -w net.bridge.bridge-nf-call-iptables=1 2>/dev/null || true; sysctl -w net.bridge.bridge-nf-call-ip6tables=1 2>/dev/null || true; sysctl -w net.core.default_qdisc=fq 2>/dev/null || true; sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null || true' ]
-  - [ "{{ sandbox_shell }}", "-c", '{% if v1.distro == "alpine" %}rc-service sshd reload{% else %}systemctl reload ssh 2>/dev/null || systemctl reload sshd{% endif %}' ]
-  - [ "{{ sandbox_shell }}", "-c", 'if [ "$(cat /etc/sandbox-profile 2>/dev/null)" = dev ]; then {{ sandbox_shell }} /usr/local/sbin/sandbox-provision; fi' ]
+  - [ "{{ sandbox_shell }}", "-c", '{% if is_alpine %}rc-service sshd reload{% else %}systemctl reload ssh 2>/dev/null || systemctl reload sshd{% endif %}' ]
+{% if profile == 'dev' %}
+{% if is_rhel %}
+  - [ "{{ sandbox_shell }}", "-c", 'dnf install -y "kernel-modules-extra-$(uname -r)" "kernel-modules-$(uname -r)" || true; modprobe xt_addrtype 2>/dev/null || true; modprobe iptable_nat 2>/dev/null || true' ]
+{% endif %}
+{% if is_alpine %}
+  - [ "{{ sandbox_shell }}", "-c", 'sed -i "s/^#rc_cgroup_mode=\"unified\"/rc_cgroup_mode=\"unified\"/" /etc/rc.conf 2>/dev/null || true; rm -f /run/openrc/starting/cgroups /run/openrc/stopping/cgroups; rc-update add cgroups default 2>/dev/null || true; service cgroups start 2>/dev/null || true; grep -q " /sys/fs/cgroup " /proc/mounts || { mkdir -p /sys/fs/cgroup; mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null || true; }; rc-update add docker default 2>/dev/null || true; service docker start; addgroup dev docker 2>/dev/null || true' ]
+{% elif is_arch or is_suse or is_debian or is_rhel %}
+  - [ "{{ sandbox_shell }}", "-c", 'systemctl enable --now docker; usermod -aG docker dev' ]
+{% else %}
+  - [ "{{ sandbox_shell }}", "-c", 'echo "unsupported distro: {{ v1.distro }}"; exit 1' ]
+{% endif %}
+{% if not is_arch and not is_alpine %}
+  - [ "{{ sandbox_shell }}", "-c", 'curl -LsSf --retry 3 https://astral.sh/uv/install.sh -o /tmp/uv-install.sh && UV_INSTALL_DIR=/usr/local/bin sh /tmp/uv-install.sh || sh /tmp/uv-install.sh || true; [ -x /root/.local/bin/uv ] && ln -sf /root/.local/bin/uv /usr/local/bin/uv || true' ]
+{% endif %}
+  - [ "{{ sandbox_shell }}", "-c", 'for i in 1 2 3 4 5; do docker info >/dev/null 2>&1 && break; sleep 2; done; docker --version; docker compose version || true; node --version; npm --version; uv --version; docker info >/dev/null 2>&1; touch /var/log/sandbox-provision.done' ]
+{% endif %}
 EOF
 }
 
@@ -706,43 +815,46 @@ validate_user_data() {
             return 0
         fi
         tmpd="$(mktemp -d)"
-        if ! python3 - "$file" "$tmpd" "$FQDN" "$PROFILE" "$PROVISION_URL" <<'PY'
+        if ! python3 - "$file" "$tmpd" "$FQDN" "$PROFILE" <<'PY'
 import pathlib
 import sys
 
 import jinja2
 
-src, outdir, fqdn, profile, url = sys.argv[1:6]
+src, outdir, fqdn, profile = sys.argv[1:5]
 text = pathlib.Path(src).read_text()
 env = jinja2.Environment(undefined=jinja2.StrictUndefined)
-for distro in ("debian", "alpine"):
-    ctx = {
-        "v1": {"distro": distro},
-        "ds": {
-            "meta_data": {
-                "sandbox": {
-                    "fqdn": fqdn,
-                    "profile": profile,
-                    "provision_url": url,
+for distro in ("debian", "ubuntu", "almalinux", "opensuse", "arch", "alpine"):
+    for render_profile in ("dev", "minimal"):
+        ctx = {
+            "v1": {"distro": distro},
+            "ds": {
+                "meta_data": {
+                    "sandbox": {
+                        "fqdn": fqdn,
+                        "profile": render_profile,
+                    }
                 }
-            }
-        },
-    }
-    rendered = env.from_string(text).render(**ctx)
-    lines = rendered.splitlines()
-    if lines and lines[0].startswith("## template: jinja"):
-        lines = lines[1:]
-    pathlib.Path(outdir, f"user-data-{distro}.yaml").write_text("\n".join(lines) + "\n")
+            },
+        }
+        rendered = env.from_string(text).render(**ctx)
+        lines = rendered.splitlines()
+        if lines and lines[0].startswith("## template: jinja"):
+            lines = lines[1:]
+        pathlib.Path(outdir, f"user-data-{distro}-{render_profile}.yaml").write_text(
+            "\n".join(lines) + "\n"
+        )
 PY
         then
             rm -rf "$tmpd"
             die "$(t 'user-data 模板渲染失败' 'user-data template rendering failed'): $file"
         fi
-        if ! cloud-init schema -c "$tmpd/user-data-debian.yaml" >/dev/null \
-            || ! cloud-init schema -c "$tmpd/user-data-alpine.yaml" >/dev/null; then
-            rm -rf "$tmpd"
-            die "$(t 'user-data 未通过 cloud-init schema 校验' 'user-data failed cloud-init schema validation'): $USER_DATA"
-        fi
+        for rendered in "$tmpd"/user-data-*.yaml; do
+            if ! cloud-init schema -c "$rendered" >/dev/null; then
+                rm -rf "$tmpd"
+                die "$(t 'user-data 未通过 cloud-init schema 校验' 'user-data failed cloud-init schema validation'): $rendered"
+            fi
+        done
         rm -rf "$tmpd"
     else
         if ! cloud-init schema -c "$file" >/dev/null; then
@@ -780,7 +892,6 @@ run_main() {
     SSH_KEY="${VM_SSH_KEY:-}"
     FQDN="${VM_FQDN:-kebyn.cc}"
     PROFILE="${VM_PROFILE:-dev}"
-    PROVISION_URL="${VM_PROVISION_URL:-https://raw.githubusercontent.com/kebyn/sandbox/main/provision.sh}"
     FOREGROUND=0
     TTY_STDIN=0
     BACKGROUND=0
@@ -817,7 +928,6 @@ run_main() {
             --ssh-key)        SSH_KEY="${2:?missing value for --ssh-key}"; shift 2 ;;
             --fqdn)           FQDN="${2:?missing value for --fqdn}"; shift 2 ;;
             --profile)        PROFILE="${2:?missing value for --profile}"; shift 2 ;;
-            --provision-url)  PROVISION_URL="${2:?missing value for --provision-url}"; shift 2 ;;
             --foreground)     FOREGROUND=1; shift ;;
             --background)     BACKGROUND=1; shift ;;
             --wait-timeout)   WAIT_TIMEOUT="${2:?missing value for --wait-timeout}"; shift 2 ;;
@@ -866,10 +976,6 @@ run_main() {
     if [ -z "$FQDN" ]; then
         die "$(t '--fqdn 不能为空' '--fqdn must not be empty')"
     fi
-    if [ "$PROFILE" = dev ] && [ -z "$PROVISION_URL" ]; then
-        die "$(t 'dev profile 需要 --provision-url' 'dev profile requires --provision-url')"
-    fi
-
     if ! distro_info "$DISTRO"; then
         if [ -n "$IMAGE" ] || [ -n "$URL" ]; then
             DISTRO_LABEL="$DISTRO"
@@ -1221,54 +1327,12 @@ run_main() {
             template_tmp=1
         fi
 
-        provision_file="$SCRIPT_DIR/provision.sh"
-        provision_tmp=0
-        provision_block_tmp=0
-        if [ "$PROFILE" = dev ]; then
-            if [ ! -f "$provision_file" ]; then
-                provision_file="$(mktemp)"
-                if ! curl -fsSL --retry 3 "$PROVISION_URL" -o "$provision_file"; then
-                    rm -f "$provision_file"
-                    if [ "$template_tmp" -eq 1 ]; then
-                        rm -f "$template"
-                    fi
-                    die "$(t '无法下载 provision.sh' 'cannot download provision.sh'): $PROVISION_URL"
-                fi
-                provision_tmp=1
-            fi
-            provision_block="$(mktemp)"
-            provision_block_tmp=1
-            {
-                printf '  - path: /usr/local/sbin/sandbox-provision\n'
-                printf "    permissions: '0755'\n"
-                printf '    content: |\n'
-                sed 's/^/      /' "$provision_file"
-            } > "$provision_block"
-        else
-            provision_block=/dev/null
-        fi
-
-        rendered="$(mktemp)"
         tmp="$(mktemp)"
-        sed "s|__SSH_PUBKEY__|${pub}|g" "$template" > "$rendered"
-        awk -v block="$provision_block" '
-            /^# __PROVISION_FILE__$/ {
-                while ((getline line < block) > 0) print line
-                close(block)
-                next
-            }
-            { print }
-        ' "$rendered" > "$tmp"
+        sed "s|__SSH_PUBKEY__|${pub}|g" "$template" > "$tmp"
         install -m 600 "$tmp" "$USER_DATA"
-        rm -f "$tmp" "$rendered"
-        if [ "$provision_block_tmp" -eq 1 ]; then
-            rm -f "$provision_block"
-        fi
+        rm -f "$tmp"
         if [ "$template_tmp" -eq 1 ]; then
             rm -f "$template"
-        fi
-        if [ "$provision_tmp" -eq 1 ]; then
-            rm -f "$provision_file"
         fi
         if [ -z "$SSH_KEY" ]; then
             SSH_KEY="$VM_DIR/id_ed25519"
@@ -1283,11 +1347,11 @@ run_main() {
 
     validate_user_data "$USER_DATA"
 
-    hash="$(printf '%s\n%s\n%s\n%s\n' "$(cat "$USER_DATA")" "$FQDN" "$PROFILE" "$PROVISION_URL" \
+    hash="$(printf '%s\n%s\n%s\n' "$(cat "$USER_DATA")" "$FQDN" "$PROFILE" \
         | sha256sum | awk '{print substr($1, 1, 12)}')"
     meta_tmp="$(mktemp)"
-    printf 'instance-id: iid-%s\nlocal-hostname: local\nsandbox:\n  fqdn: "%s"\n  profile: "%s"\n  provision_url: "%s"\n' \
-        "$hash" "$FQDN" "$PROFILE" "$PROVISION_URL" > "$meta_tmp"
+    printf 'instance-id: iid-%s\nlocal-hostname: local\nsandbox:\n  fqdn: "%s"\n  profile: "%s"\n' \
+        "$hash" "$FQDN" "$PROFILE" > "$meta_tmp"
     if ! cmp -s "$meta_tmp" "$VM_DIR/meta-data" 2>/dev/null; then
         mv "$meta_tmp" "$VM_DIR/meta-data"
     else

@@ -7,8 +7,7 @@
 ## 文件
 
 - `sandbox.sh`：唯一实现。子命令 `bootstrap`、`run`、`stop`，支持中文/英文和 `curl | bash`。
-- `provision.sh`：按发行版安装 Docker、uv、Node.js LTS 和常用工具，会嵌入 cloud-init seed。
-- `user-data.yaml.tmpl`：`~/user-data.yaml` 不存在时用于生成默认配置；`sandbox.sh` 内有同样的内嵌副本，供管道模式使用。
+- `user-data.yaml.tmpl`：`~/user-data.yaml` 不存在时用于生成默认配置，包含 cloud-init Jinja 逻辑和软件包列表；`sandbox.sh` 内有同样的内嵌副本，供管道模式使用。
 - `.gitignore`：镜像、磁盘、seed、日志和密钥不进入仓库。
 
 ## 快速开始
@@ -77,10 +76,10 @@ VM_LANG=zh ./sandbox.sh run --dry-run
 - Alpine 的 `dev` 用户 shell 为 `/bin/sh`，其它发行版为 `/bin/bash`。
 - 关闭 SSH 密码登录和 keyboard-interactive，仅允许公钥。
 - 通过 `/etc/sysctl.d/99-sandbox.conf` 调优内核参数，`/etc/modules-load.d/sandbox.conf` 加载 `br_netfilter` 和 `overlay`。
-- `--profile dev`（默认）安装 Docker Engine + Compose、uv、Node.js LTS、git、curl、jq 和编译工具。首次启动需要几分钟；完成标记是 `/var/log/sandbox-provision.done`，日志是 `/var/log/sandbox-provision.log`。
-- `--profile minimal` 保留 SSH 加固、主机名和 sysctl，跳过 Docker/Node/uv。
-
-`--provision-url` 仅在本地没有 `provision.sh` 时使用（例如 curl 模式），由宿主机下载后嵌入 seed。RHEL 系镜像的 Docker CE 可能安装更新的内核；provision 脚本会同时安装当前运行内核的额外模块，保证 Docker 能立即启动。
+- `--profile dev`（默认）通过 cloud-init `packages` 安装 Docker、Node.js 和常用工具；`runcmd` 只负责启动服务、把 `dev` 加入 docker 组、应用 sysctl/modules，以及在没有发行版包时安装 uv。
+- `--profile minimal` 保留 SSH 加固、主机名和 sysctl，跳过 `packages` 和 dev 相关 `runcmd`。
+- Node.js 来自发行版仓库（Arch 使用 `nodejs-lts`）。RHEL 系镜像通过 `yum_repos` 添加 Docker CE 仓库，可能安装更新的内核；一小段 `runcmd` 会补装当前运行内核的额外模块，保证 Docker 能立即启动。
+- 完成标记是 `/var/log/sandbox-provision.done`；cloud-init 输出在 `/var/log/cloud-init-output.log`。
 
 登录：
 
