@@ -135,6 +135,7 @@ run_usage_zh() {
       --bind-addr ADDR         转发端口绑定地址（默认 IPv4+IPv6 全部）
       --ssh-user USER          登录提示中的用户（默认 dev）
       --ssh-key PATH           登录提示中的私钥
+      --foreground             管道模式下把 QEMU stdin 接到 /dev/tty
       --background             后台运行并等待 SSH
       --wait-timeout SEC       后台启动超时（默认 600）
       --recreate-seed          强制重建 seed.img
@@ -171,6 +172,7 @@ Usage:
       --bind-addr ADDR         Bind forwarded ports to ADDR (default: all IPv4+IPv6)
       --ssh-user USER          User shown in the login hint (default: dev)
       --ssh-key PATH           Private key shown in the login hint
+      --foreground             Attach QEMU stdin to /dev/tty in pipe mode
       --background             Run QEMU as a daemon and wait for SSH
       --wait-timeout SEC       Background startup timeout (default: 600)
       --recreate-seed          Rebuild seed.img even if it is current
@@ -222,10 +224,8 @@ stop_usage() {
 SELF="${BASH_SOURCE[0]:-}"
 if [ -n "$SELF" ] && [ -f "$SELF" ]; then
     SCRIPT_DIR="$(cd -- "$(dirname -- "$SELF")" && pwd)"
-    PIPE_MODE=0
 else
     SCRIPT_DIR="$PWD"
-    PIPE_MODE=1
 fi
 
 # Keep this in sync with user-data.yaml.tmpl. It is the fallback for
@@ -587,6 +587,8 @@ run_main() {
     BIND_ADDR="${VM_BIND_ADDR:-}"
     SSH_USER="${VM_SSH_USER:-dev}"
     SSH_KEY="${VM_SSH_KEY:-}"
+    FOREGROUND=0
+    TTY_STDIN=0
     BACKGROUND=0
     WAIT_TIMEOUT="${VM_WAIT_TIMEOUT:-600}"
     RECREATE_SEED=0
@@ -618,6 +620,7 @@ run_main() {
             --bind-addr)      BIND_ADDR="${2:?missing value for --bind-addr}"; shift 2 ;;
             --ssh-user)       SSH_USER="${2:?missing value for --ssh-user}"; shift 2 ;;
             --ssh-key)        SSH_KEY="${2:?missing value for --ssh-key}"; shift 2 ;;
+            --foreground)     FOREGROUND=1; shift ;;
             --background)     BACKGROUND=1; shift ;;
             --wait-timeout)   WAIT_TIMEOUT="${2:?missing value for --wait-timeout}"; shift 2 ;;
             --recreate-seed)  RECREATE_SEED=1; shift ;;
@@ -636,7 +639,19 @@ run_main() {
         exit 0
     fi
 
-    if [ "$PIPE_MODE" -eq 1 ] && [ "$BACKGROUND" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+    if [ "$FOREGROUND" -eq 1 ] && [ "$BACKGROUND" -eq 1 ]; then
+        die "$(t '--foreground 和 --background 不能同时使用' '--foreground and --background cannot be used together')"
+    fi
+
+    if [ "$FOREGROUND" -eq 1 ] && [ "$DRY_RUN" -eq 0 ] && [ ! -t 0 ]; then
+        if [ -r /dev/tty ] && [ -t 1 ]; then
+            TTY_STDIN=1
+        else
+            die "$(t '--foreground 需要控制终端（/dev/tty）和终端输出；改用 --background 或 bash <(curl ...)' '--foreground requires a controlling terminal (/dev/tty) and terminal output; use --background or bash <(curl ...)')"
+        fi
+    fi
+
+    if [ "$BACKGROUND" -eq 0 ] && [ "$DRY_RUN" -eq 0 ] && [ "$FOREGROUND" -eq 0 ] && [ ! -t 0 ]; then
         BACKGROUND=1
         log "$(t '标准输入不是终端，自动切换到后台模式' 'stdin is not a TTY; switching to background mode')"
     fi
@@ -1059,7 +1074,12 @@ run_main() {
         log "$(t 'VM 已启动（控制台:' 'VM is up (console:') $VM_DIR/console.log)"
     else
         printf '%s\n' "$(t '按 Ctrl-A X 退出。' 'Press Ctrl-A X to quit.')"
-        exec "$QEMU_BIN" "${QEMU_ARGS[@]}"
+        if [ "$TTY_STDIN" -eq 1 ]; then
+            log "$(t '把 QEMU stdin 接到 /dev/tty' 'attaching QEMU stdin to /dev/tty')"
+            exec "$QEMU_BIN" "${QEMU_ARGS[@]}" < /dev/tty
+        else
+            exec "$QEMU_BIN" "${QEMU_ARGS[@]}"
+        fi
     fi
 }
 

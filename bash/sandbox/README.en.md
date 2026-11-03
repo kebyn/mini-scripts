@@ -35,7 +35,11 @@ QEMU sources and build trees live in `/root/qemu-<tag>`. After a successful inst
 curl -fsSL https://raw.githubusercontent.com/kebyn/sandbox/main/sandbox.sh \
   | sudo bash -s -- bootstrap --qemu-version v11.1.2 --lang en
 
-# Start; pipe mode switches to background automatically
+# Foreground console (interactive terminal)
+curl -fsSL https://raw.githubusercontent.com/kebyn/sandbox/main/sandbox.sh \
+  | bash -s -- run --foreground --lang en
+
+# Background
 curl -fsSL https://raw.githubusercontent.com/kebyn/sandbox/main/sandbox.sh \
   | bash -s -- run --background --lang en
 
@@ -104,16 +108,23 @@ Force a fresh base image download (the work disk still follows `--keep-disk`):
 ./sandbox.sh run --accel tcg                 # no KVM
 ./sandbox.sh run --net-backend user          # passt unavailable
 ./sandbox.sh run --bind-addr 127.0.0.1       # localhost only
+./sandbox.sh run --foreground                # foreground console in pipe mode
 ./sandbox.sh run --dry-run                   # print the QEMU command
 ./sandbox.sh run --help                      # all options
 ```
 
 The Rocky image is about 520 MB; Debian is about 440 MB. `--disk` is sized dynamically and does not preallocate the full virtual size.
 
-## Pipe-mode limits
+## Pipe mode and the foreground console
 
-- Pipe mode automatically uses `--background` because stdin is consumed by curl, so the foreground serial console is unavailable.
-- For a foreground console, download the script first:
+- `bash <(curl ...) run`: stdin stays attached to the terminal, so this runs in the foreground:
+  ```bash
+  bash <(curl -fsSL https://raw.githubusercontent.com/kebyn/sandbox/main/sandbox.sh) run
+  ```
+- `curl ... | bash -s -- run --foreground`: attaches QEMU stdin to `/dev/tty`; a controlling terminal and terminal output are required. `--foreground` and `--background` are mutually exclusive.
+- `curl ... | bash -s -- run`: automatically uses background mode when stdin is not a TTY, matching the previous behavior.
+- CI, cron and `setsid` environments have no controlling terminal; use `--background`.
+- For a foreground console you can also download the script first:
   ```bash
   curl -fsSL https://raw.githubusercontent.com/kebyn/sandbox/main/sandbox.sh -o sandbox.sh
   chmod +x sandbox.sh

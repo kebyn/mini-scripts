@@ -35,7 +35,11 @@ QEMU 源码和构建目录位于 `/root/qemu-<tag>`。安装成功后默认删�
 curl -fsSL https://raw.githubusercontent.com/kebyn/sandbox/main/sandbox.sh \
   | sudo bash -s -- bootstrap --qemu-version v11.1.2 --lang zh
 
-# 启动；管道模式自动后台
+# 前台串口（交互式终端）
+curl -fsSL https://raw.githubusercontent.com/kebyn/sandbox/main/sandbox.sh \
+  | bash -s -- run --foreground --lang zh
+
+# 后台启动
 curl -fsSL https://raw.githubusercontent.com/kebyn/sandbox/main/sandbox.sh \
   | bash -s -- run --background --lang zh
 
@@ -104,16 +108,23 @@ ssh -p 8022 dev@127.0.0.1
 ./sandbox.sh run --accel tcg                 # 没有 KVM 时
 ./sandbox.sh run --net-backend user          # passt 不可用时
 ./sandbox.sh run --bind-addr 127.0.0.1       # 只监听本机
+./sandbox.sh run --foreground                # 管道模式前台串口
 ./sandbox.sh run --dry-run                   # 只打印 QEMU 命令
 ./sandbox.sh run --help                      # 全部选项
 ```
 
 Rocky 镜像约 520 MB，Debian 镜像约 440 MB。`--disk` 默认按剩余空间动态计算，不会预分配全部空间。
 
-## 管道模式限制
+## 管道模式与前台串口
 
-- 管道模式自动使用 `--background`，因为 stdin 被 curl 占用，无法接前台串口。
-- 需要前台串口时，先下载脚本再运行：
+- `bash <(curl ...) run`：stdin 仍是终端，直接前台运行：
+  ```bash
+  bash <(curl -fsSL https://raw.githubusercontent.com/kebyn/sandbox/main/sandbox.sh) run
+  ```
+- `curl ... | bash -s -- run --foreground`：把 QEMU stdin 接到 `/dev/tty`，需要控制终端和终端输出。`--foreground` 与 `--background` 互斥。
+- `curl ... | bash -s -- run`：stdin 不是 TTY 时自动后台，行为和之前一致。
+- CI、cron、`setsid` 等没有控制终端的环境使用 `--background`。
+- 需要前台串口时，也可以先下载再运行：
   ```bash
   curl -fsSL https://raw.githubusercontent.com/kebyn/sandbox/main/sandbox.sh -o sandbox.sh
   chmod +x sandbox.sh
