@@ -119,8 +119,9 @@ run_usage_zh() {
       --list-distros           列出支持的发行版别名、版本和镜像地址
   -i, --image PATH             使用已有镜像作为基底
       --url URL                覆盖基底下载地址
-  -c, --cpus N                 vCPU 数（默认 min(4, nproc)）
-  -m, --mem MiB                guest 内存 MiB（默认 min(8192, 可用-1024)）
+  -c, --cpus N                 vCPU 数（默认 nproc）
+  -m, --mem MiB                guest 内存 MiB（默认 可用 RAM + swap - 1024）
+      --mem-swap on|off        默认内存是否计入 swap（默认 on）
   -s, --disk SIZE              guest 磁盘大小（默认剩余空间 90%；K/M/G/T）
       --user-data PATH         cloud-init user-data（默认 ~/user-data.yaml）
       --seed PATH              seed 镜像（默认 /data/seed.img）
@@ -159,8 +160,9 @@ Usage:
       --list-distros           List supported distro aliases, versions and image URLs
   -i, --image PATH             Use an existing image as the base
       --url URL                Override the base image URL
-  -c, --cpus N                 vCPUs (default: min(4, nproc))
-  -m, --mem MiB                Guest RAM in MiB (default: min(8192, available-1024))
+  -c, --cpus N                 vCPUs (default: nproc)
+  -m, --mem MiB                Guest RAM in MiB (default: available RAM + swap - 1024)
+      --mem-swap on|off        Count swap in the default RAM calculation (default: on)
   -s, --disk SIZE              Guest disk size (default: 90% of free space; K/M/G/T suffix)
       --user-data PATH         cloud-init user-data (default: ~/user-data.yaml)
       --seed PATH              cloud-init seed image (default: /data/seed.img)
@@ -871,6 +873,7 @@ run_main() {
     LIST_DISTROS=0
     CPUS="${VM_CPUS:-}"
     MEM_MIB="${VM_MEM_MIB:-}"
+    MEM_SWAP="${VM_MEM_SWAP:-on}"
     DISK_SPEC="${VM_DISK:-}"
     DISK_SET=0
     IMAGE="${VM_IMAGE:-}"
@@ -911,6 +914,7 @@ run_main() {
             --url)            URL="${2:?missing value for --url}"; shift 2 ;;
             -c|--cpus)        CPUS="${2:?missing value for --cpus}"; shift 2 ;;
             -m|--mem)         MEM_MIB="${2:?missing value for --mem}"; shift 2 ;;
+            --mem-swap)       MEM_SWAP="${2:?missing value for --mem-swap}"; shift 2 ;;
             -s|--disk)        DISK_SPEC="${2:?missing value for --disk}"; DISK_SET=1; shift 2 ;;
             --user-data)      USER_DATA="${2:?missing value for --user-data}"; shift 2 ;;
             --seed)           SEED="${2:?missing value for --seed}"; shift 2 ;;
@@ -992,6 +996,7 @@ run_main() {
     case "$NET_BACKEND" in passt|user) ;; *) die "$(t '--net-backend 必须是 passt 或 user' '--net-backend must be passt or user')" ;; esac
     case "$ACCEL" in auto|kvm|tcg) ;; *) die "$(t '--accel 必须是 auto、kvm 或 tcg' '--accel must be auto, kvm or tcg')" ;; esac
     case "$AIO" in io_uring|threads|native) ;; *) die "$(t '--aio 必须是 io_uring、threads 或 native' '--aio must be io_uring, threads or native')" ;; esac
+    case "$MEM_SWAP" in on|off) ;; *) die "$(t '--mem-swap 必须是 on 或 off' '--mem-swap must be on or off')" ;; esac
 
     if [ -n "$IMAGE" ] && [ -n "$URL" ]; then
         die "$(t '--image 和 --url 不能同时使用' '--image and --url cannot be used together')"
@@ -1081,29 +1086,48 @@ run_main() {
 
     if [ -z "$CPUS" ]; then
         CPUS="$(nproc)"
-        if [ "$CPUS" -gt 4 ]; then
-            CPUS=4
-        fi
     fi
     if ! [[ "$CPUS" =~ ^[1-9][0-9]*$ ]]; then
         die "$(t '--cpus 必须是正整数' '--cpus must be a positive integer')"
     fi
 
+    HOST_RAM_AVAIL_KB="$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo 2>/dev/null || true)"
+    MEM_SWAP_USED=0
     if [ -z "$MEM_MIB" ]; then
-        avail_kb="$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo)"
-        [ -n "$avail_kb" ] || die "$(t '无法从 /proc/meminfo 读取 MemAvailable' 'cannot read MemAvailable from /proc/meminfo')"
-        mem=$((avail_kb / 1024 - 1024))
-        if [ "$mem" -gt 8192 ]; then
-            mem=8192
+        [ -n "$HOST_RAM_AVAIL_KB" ] || die "$(t '无法从 /proc/meminfo 读取 MemAvailable' 'cannot read MemAvailable from /proc/meminfo')"
+        swap_kb="$(awk '/^SwapFree:/ {print $2; exit}' /proc/meminfo 2>/dev/null || true)"
+        [ -n "$swap_kb" ] || swap_kb=0
+        avail_kb="$HOST_RAM_AVAIL_KB"
+        if [ "$MEM_SWAP" = on ]; then
+            avail_kb=$((avail_kb + swap_kb))
+            if [ "$swap_kb" -gt 0 ]; then
+                MEM_SWAP_USED=1
+                log "$(t "内存: $((HOST_RAM_AVAIL_KB / 1024)) MiB RAM + $((swap_kb / 1024)) MiB swap 可用" "memory: $((HOST_RAM_AVAIL_KB / 1024)) MiB RAM + $((swap_kb / 1024)) MiB swap available")"
+            fi
         fi
+        mem=$((avail_kb / 1024 - 1024))
         if [ "$mem" -lt 1024 ]; then
-            die "$(t '可用内存不足 1 GiB；释放内存或使用 --mem' 'less than 1 GiB of memory available; free memory or use --mem')"
+            die "$(t '可用内存（RAM + swap）不足 1 GiB；释放内存或使用 --mem' 'less than 1 GiB of memory available (RAM + swap); free memory or use --mem')"
         fi
         MEM_MIB=$((mem / 128 * 128))
     fi
     if ! [[ "$MEM_MIB" =~ ^[1-9][0-9]*$ ]]; then
         die "$(t '--mem 必须是正整数（MiB）' '--mem must be a positive integer (MiB)')"
     fi
+
+    PREALLOC=on
+    if [ -n "$HOST_RAM_AVAIL_KB" ] && [ $((MEM_MIB * 1024 + 1048576)) -gt "$HOST_RAM_AVAIL_KB" ]; then
+        PREALLOC=off
+        warn "$(t 'guest 内存超过主机可用 RAM；关闭 prealloc，QEMU 将延迟分配并可能使用 swap（性能下降）' 'guest RAM exceeds available host RAM; disabling prealloc, QEMU will allocate lazily and may use swap (slower)')"
+    fi
+
+    mem_summary() {
+        local note=""
+        if [ "$MEM_SWAP_USED" -eq 1 ]; then
+            note=", $(t '已计入 swap' 'includes swap')"
+        fi
+        printf '%s MiB RAM, prealloc=%s%s' "$MEM_MIB" "$PREALLOC" "$note"
+    }
 
     mkdir -p "$VM_DIR" "$(dirname "$SEED")" "$(dirname "$DISK")"
 
@@ -1180,7 +1204,7 @@ run_main() {
             -cpu "${CPU_MODEL}"
             -smp "${CPUS},sockets=1,cores=${CPUS},threads=1"
             -m "${MEM_MIB}"
-            -object "memory-backend-memfd,id=mem,size=${MEM_MIB}M,share=on,prealloc=on"
+            -object "memory-backend-memfd,id=mem,size=${MEM_MIB}M,share=on,prealloc=${PREALLOC}"
             -numa "node,memdev=mem"
             -object "iothread,id=iothread"
             -device "virtio-blk-pci,drive=hd0,iothread=iothread"
@@ -1221,7 +1245,7 @@ run_main() {
         else
             log "$(t '磁盘大小:' 'disk size:') $(t '保留现有' 'keep existing')"
         fi
-        log "$(t '资源:' 'resources:') ${CPUS} vCPU, ${MEM_MIB} MiB RAM, ${ACCEL}, ${NET_BACKEND}"
+        log "$(t '资源:' 'resources:') ${CPUS} vCPU, $(mem_summary), ${ACCEL}, ${NET_BACKEND}"
         if [ "$KEEP_DISK" -eq 1 ]; then
             reset_text="$(t '否' 'no')"
         else
@@ -1379,7 +1403,7 @@ run_main() {
     build_netdev
     build_qemu_args
 
-    log "$(t '正在启动 QEMU:' 'starting QEMU:') ${CPUS} vCPU, ${MEM_MIB} MiB RAM, ${ACCEL}, ${NET_BACKEND}, disk ${DISK}"
+    log "$(t '正在启动 QEMU:' 'starting QEMU:') ${CPUS} vCPU, $(mem_summary), ${ACCEL}, ${NET_BACKEND}, disk ${DISK}"
     printf '%s %s\n' "$(t '登录:' 'login:')" "$(print_ssh_hint)"
 
     if [ "$BACKGROUND" -eq 1 ]; then

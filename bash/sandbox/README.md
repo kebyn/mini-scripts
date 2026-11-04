@@ -63,11 +63,13 @@ VM_LANG=zh ./sandbox.sh run --dry-run
 ## run defaults
 
 - Distro: Debian 13
-- vCPUs: `min(4, nproc)`
-- RAM: `min(8192, MemAvailable - 1024)` MiB
+- vCPUs: `nproc`
+- RAM: `MemAvailable + SwapFree - 1024` MiB; no fixed upper limit
 - Disk: 90% of free space on the filesystem containing `/data`
 - Ports: SSH `8022`, HTTP `8080`, HTTPS `8443`; all IPv4 and IPv6 addresses by default
 - Hostname: `local`; FQDN from `--fqdn` (default `kebyn.cc`)
+
+Swap is counted by default. Guest RAM that exceeds available host RAM is allocated lazily and may be swapped, which is slower; use `--mem-swap off` to size from RAM only.
 
 ## Default guest environment
 
@@ -144,6 +146,7 @@ Force a fresh base image download (the work disk still follows `--keep-disk`):
 
 ```bash
 ./sandbox.sh run --distro rocky --cpus 4 --mem 8192 --disk 100G
+./sandbox.sh run --mem-swap off              # size RAM from host RAM only
 ./sandbox.sh run --list-distros              # supported aliases
 ./sandbox.sh run --accel tcg                 # no KVM
 ./sandbox.sh run --net-backend user          # passt unavailable

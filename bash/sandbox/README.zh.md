@@ -63,11 +63,13 @@ VM_LANG=zh ./sandbox.sh run --dry-run
 ## run 默认值
 
 - 发行版：Debian 13
-- vCPU：`min(4, nproc)`
-- 内存：`min(8192, MemAvailable - 1024)` MiB
+- vCPU：`nproc`
+- 内存：`MemAvailable + SwapFree - 1024` MiB；不设固定上限
 - 磁盘：`/data` 所在文件系统剩余空间的 90%
 - 端口：SSH `8022`、HTTP `8080`、HTTPS `8443`，默认监听 IPv4 和 IPv6 的所有地址
 - 主机名：`local`；FQDN 由 `--fqdn` 指定（默认 `kebyn.cc`）
+
+默认计入 swap。guest 内存超过主机可用 RAM 时会延迟分配并可能使用 swap，性能会下降；用 `--mem-swap off` 可以只按 RAM 计算。
 
 ## 默认 guest 环境
 
@@ -144,6 +146,7 @@ Alpine 云镜像使用无分区磁盘，并且会拒绝被锁定的 cloud-init �
 
 ```bash
 ./sandbox.sh run --distro rocky --cpus 4 --mem 8192 --disk 100G
+./sandbox.sh run --mem-swap off              # 只按主机 RAM 计算内存
 ./sandbox.sh run --list-distros              # 支持的发行版
 ./sandbox.sh run --accel tcg                 # 没有 KVM 时
 ./sandbox.sh run --net-backend user          # passt 不可用时
