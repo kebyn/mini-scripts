@@ -91,3 +91,13 @@ dl
 ```bash
 REPONAME="youruser/test-repo" ./reg-v2-cdn.sh
 ```
+
+---
+
+## 7. `sysinfo.sh` — 离线系统基础信息采集脚本（YABS-lite）
+
+对标 [YABS (Yet Another Bench Script)](https://github.com/masonr/yet-another-bench-script) 的 `Basic System Information` 模块（等效于本地离线版 `curl -sL yabs.sh | bash -s -- -dig`）。无需联网、无需下载、无需 `root` 权限，仅依赖 `/proc` 与基础 `coreutils` 即可输出运行时间、CPU 型号与核心频率、AES-NI / 虚拟化指令集状态、内存/Swap/磁盘总量、发行版、内核版本、虚拟化类型及全局 IPv4/IPv6 地址状态。
+
+```bash
+./sysinfo.sh
+```
