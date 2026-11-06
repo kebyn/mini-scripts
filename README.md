@@ -41,8 +41,8 @@
 
 | 子项目 | 功能说明 |
 | :--- | :--- |
-| [`aliyun_ecs`](./golang/aliyun_ecs/) | 自动创建阿里云抢占式（Spot）ECS 实例、分配公网 IP、启动实例并设置自动释放时间 |
 | [`bytes2human`](./golang/bytes2human/) | 将字节数（`int64`）转换为人类可读的单位字符串（`B`、`KB`、`MB`、`GB`、`TB`、`PB`） |
+| [`cloud_instance`](./golang/cloud_instance/) | 自动创建阿里云 ECS 或腾讯云 CVM 抢占式（Spot）实例（默认 `aliyun`，支持 `-provider tencent`）、分配公网 IP、启动实例并设置定时自动释放/销毁时间 |
 | [`delete_expired_file`](./golang/delete_expired_file/) | 递归清理指定目录下超过 N 天（默认 7 天）的过期文件（含多阶段构建 `Dockerfile`） |
 | [`examples`](./golang/examples/) | 监听 `:8080` 并返回当前主机/容器非回环 IPv4 地址的轻量 HTTP 服务（常用于 K8s Pod 测试） |
 | [`get_local_ip`](./golang/get_local_ip/) | 获取并打印本机局域网 IPv4 地址的控制台小工具 |
