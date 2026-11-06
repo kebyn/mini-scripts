@@ -1,2 +1,2 @@
-FROM alpine
-RUN apk add  --no-cache bind-tools
+FROM alpine:3.21
+RUN apk add --no-cache bind-tools

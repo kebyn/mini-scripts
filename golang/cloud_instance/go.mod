@@ -1,6 +1,6 @@
 module github.com/kebyn/mini-scripts/cloud_instance
 
-go 1.22.0
+go 1.26.0
 
 require (
 	github.com/alibabacloud-go/darabonba-openapi/v2 v2.2.5

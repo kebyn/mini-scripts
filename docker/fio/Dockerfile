@@ -1,3 +1,4 @@
-FROM centos:7
+FROM almalinux:9
 
-RUN yum install -y fio libaio-devel
+RUN dnf install -y fio libaio-devel && \
+    dnf clean all
