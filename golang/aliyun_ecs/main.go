@@ -4,6 +4,7 @@ import (
 	"flag"
 	"log"
 	"math/rand"
+	"os"
 	"regexp"
 	"time"
 
@@ -11,9 +12,16 @@ import (
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/ecs"
 )
 
-func main() {
+var (
+	upperRegexp  = regexp.MustCompile(`[A-Z]`)
+	lowerRegexp  = regexp.MustCompile(`[a-z]`)
+	numberRegexp = regexp.MustCompile(`[0-9]`)
+	otherRegexp  = regexp.MustCompile(`[^0-9a-zA-Z]`)
+)
 
+func main() {
 	var (
+		region      string
 		hostname    string
 		releasetime int64
 		ipaddress   string
@@ -22,15 +30,21 @@ func main() {
 		status      string
 		err         error
 	)
-	flag.StringVar(&hostname, "hostname", "example", "hostname")
-	flag.Int64Var(&releasetime, "releasetime", 1, "releasetime")
+	flag.StringVar(&region, "region", "cn-shanghai", "Alibaba Cloud region ID")
+	flag.StringVar(&hostname, "hostname", "example", "instance hostname")
+	flag.Int64Var(&releasetime, "releasetime", 1, "auto release time in hours")
 	flag.Parse()
 
-	//  AccessKey
+	accessKeyID := os.Getenv("ALIBABA_CLOUD_ACCESS_KEY_ID")
+	accessKeySecret := os.Getenv("ALIBABA_CLOUD_ACCESS_KEY_SECRET")
+	if accessKeyID == "" || accessKeySecret == "" {
+		log.Fatal("environment variables ALIBABA_CLOUD_ACCESS_KEY_ID and ALIBABA_CLOUD_ACCESS_KEY_SECRET are required")
+	}
+
 	ecsClient, err := ecs.NewClientWithAccessKey(
-		"cn-shanghai",
-		"xxx",
-		"xxx",
+		region,
+		accessKeyID,
+		accessKeySecret,
 	)
 	if err != nil {
 		log.Panicf("%v", err)
@@ -67,26 +81,24 @@ func main() {
 			break
 		} else {
 			log.Printf("instance status :\t %s ", status)
-			// sleep
 			time.Sleep(500 * time.Millisecond)
 		}
 	}
 }
 
-// create instance
+// Createinstance creates a spot ECS instance.
 func Createinstance(ecsClient *ecs.Client, hostname, password string) (instanceid string, err error) {
 	request := ecs.CreateCreateInstanceRequest()
-	// request.ImageId = ""
 	// https://help.aliyun.com/zh/ecs/user-guide/overview-45
 	request.ImageFamily = "acs:almalinux_9_2_x64"
 	// https://help.aliyun.com/zh/ecs/user-guide/overview-of-instance-families?spm=a2c4g.11186623.0.i23#g8a
 	request.InstanceType = "ecs.u1-c1m1.large"
-	request.SecurityGroupId = ""
+	request.SecurityGroupId = os.Getenv("ALIBABA_CLOUD_SECURITY_GROUP_ID")
 	request.InternetChargeType = "PayByTraffic"
 	request.InternetMaxBandwidthIn = "100"
 	request.InternetMaxBandwidthOut = "100"
 	request.IoOptimized = "optimized"
-	request.VSwitchId = ""
+	request.VSwitchId = os.Getenv("ALIBABA_CLOUD_VSWITCH_ID")
 	request.InstanceChargeType = "PostPaid"
 	request.SpotStrategy = "SpotWithPriceLimit"
 	request.SpotPriceLimit = requests.NewFloat(0.98)
@@ -94,7 +106,6 @@ func Createinstance(ecsClient *ecs.Client, hostname, password string) (instancei
 	request.Password = password
 	request.InstanceName = hostname
 	request.SecurityEnhancementStrategy = "Deactive"
-	//request.ClientToken = utils.GetUUIDV4()
 	response, err := ecsClient.CreateInstance(request)
 	if err != nil {
 		log.Panicf("%v", err)
@@ -104,7 +115,7 @@ func Createinstance(ecsClient *ecs.Client, hostname, password string) (instancei
 	return response.InstanceId, nil
 }
 
-// allocate public ip instance
+// Allocatepublicipaddress allocates a public IP for the instance.
 func Allocatepublicipaddress(ecsClient *ecs.Client, instanceid string) (ipaddress string, err error) {
 	request := ecs.CreateAllocatePublicIpAddressRequest()
 	request.InstanceId = instanceid
@@ -118,7 +129,7 @@ func Allocatepublicipaddress(ecsClient *ecs.Client, instanceid string) (ipaddres
 	return ipaddress, nil
 }
 
-// starting instance
+// Startinstance starts the ECS instance.
 func Startinstance(ecsClient *ecs.Client, instanceid string) (err error) {
 	request := ecs.CreateStartInstanceRequest()
 	request.InstanceId = instanceid
@@ -131,11 +142,10 @@ func Startinstance(ecsClient *ecs.Client, instanceid string) (err error) {
 	return
 }
 
-// auto release instance
+// Autorelease sets the auto release time of the ECS instance.
 func Autorelease(ecsClient *ecs.Client, instanceid string, duration int64) (err error) {
 	request := ecs.CreateModifyInstanceAutoReleaseTimeRequest()
 	request.InstanceId = instanceid
-	// auto release time
 	request.AutoReleaseTime = time.Now().Add(time.Hour * time.Duration(duration)).UTC().Format("2006-01-02T15:04:05Z")
 	response, err := ecsClient.ModifyInstanceAutoReleaseTime(request)
 	if err != nil {
@@ -146,7 +156,7 @@ func Autorelease(ecsClient *ecs.Client, instanceid string, duration int64) (err 
 	return
 }
 
-// describe instance status/ip
+// Describeinstances queries instance status and public IP.
 func Describeinstances(ecsClient *ecs.Client, instanceid string) (status, ipaddress string, err error) {
 	request := ecs.CreateDescribeInstancesRequest()
 	request.InstanceIds = instanceid
@@ -155,34 +165,31 @@ func Describeinstances(ecsClient *ecs.Client, instanceid string) (status, ipaddr
 		log.Panicf("%v", err)
 		return
 	}
-	// get instance status
-	status = response.Instances.Instance[0].Status
+	if len(response.Instances.Instance) == 0 {
+		return "Pending", "", nil
+	}
+	inst := response.Instances.Instance[0]
+	status = inst.Status
 	log.Printf("success(%d)! status = %s", response.GetHttpStatus(), status)
-	if status == "Running" {
-		// get instance ip
-		ipaddress = response.Instances.Instance[0].PublicIpAddress.IpAddress[0]
+	if status == "Running" && len(inst.PublicIpAddress.IpAddress) > 0 {
+		ipaddress = inst.PublicIpAddress.IpAddress[0]
 		log.Printf("success(%d)! ip = %s", response.GetHttpStatus(), ipaddress)
 		return status, ipaddress, nil
 	}
-	return response.Instances.Instance[0].Status, ipaddress, nil
+	return status, ipaddress, nil
 }
 
-// range password
+// Randpassword generates a random password of length n (8 <= n <= 30) containing upper, lower, digit, and special chars.
 func Randpassword(n int) (randstring string) {
-	if n < 8 && n > 30 {
-		log.Panicf("n must be greater than 8 and less than 30 ")
+	if n < 8 || n > 30 {
+		log.Panicf("n must be between 8 and 30")
 	}
 	for {
 		randstring = RandStringBytesMaskImprSrc(n)
-		uppers, _ := regexp.Compile("[A-Z]")
-		lowers, _ := regexp.Compile("[a-z]")
-		numbers, _ := regexp.Compile("[0-9]")
-		others, _ := regexp.Compile("[^0-9a-zA-Z]")
-		upper := uppers.MatchString(randstring)
-		lower := lowers.MatchString(randstring)
-		number := numbers.MatchString(randstring)
-		other := others.MatchString(randstring)
-		if upper && lower && number && other {
+		if upperRegexp.MatchString(randstring) &&
+			lowerRegexp.MatchString(randstring) &&
+			numberRegexp.MatchString(randstring) &&
+			otherRegexp.MatchString(randstring) {
 			break
 		}
 	}
@@ -193,7 +200,7 @@ func RandStringBytesMaskImprSrc(n int) string {
 	const letterBytes = "1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ()`~!@#$%^&*-+=|{}[]:;<>,.?/"
 	src := rand.NewSource(time.Now().UnixNano())
 	const (
-		letterIdxBits = 6                    // 6 bits to represent a letter index
+		letterIdxBits = 7                    // 7 bits to represent a letter index (up to 127)
 		letterIdxMask = 1<<letterIdxBits - 1 // All 1-bits, as many as letterIdxBits
 		letterIdxMax  = 63 / letterIdxBits   // # of letter indices fitting in 63 bits
 	)

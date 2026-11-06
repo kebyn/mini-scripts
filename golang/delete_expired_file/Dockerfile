@@ -1,10 +1,10 @@
-FROM golang:1.15
+FROM golang:1.22-alpine
 
 COPY . /opt
 
 WORKDIR /opt
 
-RUN CGO_ENABLED=0 go build  -ldflags "-s"
+RUN CGO_ENABLED=0 go build -ldflags "-s -w" -o delete_expired_file main.go
 
 FROM scratch
 

@@ -20,7 +20,6 @@ func main() {
 				fmt.Printf("%v\n", address[0])
 			}
 		}
-
 	}
 	fmt.Println("Press the Enter Key to terminate the console screen!")
 	fmt.Scanln()
