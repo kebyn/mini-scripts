@@ -18,73 +18,73 @@ then
     source "config.sh"
 fi
 
-HOST=""
-HOST=127.0.0.1
+HOST="$2"
+HOST=${HOST:-127.0.0.1}
 
 # Computed vars
-ENDPORT=0
+ENDPORT=$((PORT+NODES))
 
-if [ "" == "start" ]
+if [ "$1" == "start" ]
 then
-    while [ 0 != "0" ]; do
-        PORT=1
-        echo "Starting "
-        /redis-server --bind  --port  --cluster-enabled yes --cluster-config-file nodes-.conf --cluster-node-timeout  --appendonly yes --appendfilename appendonly-.aof --dbfilename dump-.rdb --logfile .log --daemonize yes
+    while [ $((PORT < ENDPORT)) != "0" ]; do
+        PORT=$((PORT+1))
+        echo "Starting $PORT"
+        ${REDISDIR}/redis-server --bind ${HOST} --port $PORT --cluster-enabled yes --cluster-config-file nodes-${PORT}.conf --cluster-node-timeout $TIMEOUT --appendonly yes --appendfilename appendonly-${PORT}.aof --dbfilename dump-${PORT}.rdb --logfile ${PORT}.log --daemonize yes
     done
     exit 0
 fi
 
-if [ "" == "create" ]
+if [ "$1" == "create" ]
 then
     HOSTS=""
-    while [ 0 != "0" ]; do
-        PORT=1
-        HOSTS=" :"
+    while [ $((PORT < ENDPORT)) != "0" ]; do
+        PORT=$((PORT+1))
+        HOSTS="$HOSTS $HOST:$PORT"
     done
-    /redis-cli --cluster create  --cluster-replicas 
+    ${REDISDIR}/redis-cli --cluster create $HOSTS --cluster-replicas $REPLICAS
     exit 0
 fi
 
-if [ "" == "stop" ]
+if [ "$1" == "stop" ]
 then
-    while [ 0 != "0" ]; do
-        PORT=1
-        echo "Stopping "
-        /redis-cli -h  -p  shutdown nosave
+    while [ $((PORT < ENDPORT)) != "0" ]; do
+        PORT=$((PORT+1))
+        echo "Stopping $PORT"
+        ${REDISDIR}/redis-cli -h ${HOST} -p $PORT shutdown nosave
     done
     exit 0
 fi
 
-if [ "" == "watch" ]
+if [ "$1" == "watch" ]
 then
-    PORT=1
+    PORT=$((PORT+1))
     while [ 1 ]; do
         clear
         date
-        /redis-cli -h  -p  cluster nodes | head -30
+        ${REDISDIR}/redis-cli -h ${HOST} -p $PORT cluster nodes | head -30
         sleep 1
     done
     exit 0
 fi
 
-if [ "" == "tail" ]
+if [ "$1" == "tail" ]
 then
-    INSTANCE=
-    PORT=0
-    tail -f .log
+    INSTANCE=$2
+    PORT=$((PORT+INSTANCE))
+    tail -f ${PORT}.log
     exit 0
 fi
 
-if [ "" == "call" ]
+if [ "$1" == "call" ]
 then
-    while [ 0 != "0" ]; do
-        PORT=1
-        /redis-cli -h  -p         
+    while [ $((PORT < ENDPORT)) != "0" ]; do
+        PORT=$((PORT+1))
+        ${REDISDIR}/redis-cli -h ${HOST} -p $PORT $2 $3 $4 $5 $6 $7 $8 $9
     done
     exit 0
 fi
 
-if [ "" == "clean" ]
+if [ "$1" == "clean" ]
 then
     rm -rf *.log
     rm -rf appendonly*.aof
@@ -93,17 +93,18 @@ then
     exit 0
 fi
 
-if [ "" == "clean-logs" ]
+if [ "$1" == "clean-logs" ]
 then
     rm -rf *.log
     exit 0
 fi
 
-echo "Usage: -bash [start|create|stop|watch|tail|clean]"
-echo "start       -- Launch Redis Cluster instances."
-echo "create      -- Create a cluster using redis-cli --cluster create."
-echo "stop        -- Stop Redis Cluster instances."
-echo "watch       -- Show CLUSTER NODES output (first 30 lines) of first node."
-echo "tail <id>   -- Run tail -f of instance at base port + ID."
-echo "clean       -- Remove all instances data, logs, configs."
-echo "clean-logs  -- Remove just instances logs."
+echo "Usage: $0 [start|create|stop|watch|tail|clean|clean-logs|call]"
+echo "start [host]  -- Launch Redis Cluster instances (default host: 127.0.0.1)."
+echo "create [host] -- Create a cluster using redis-cli --cluster create."
+echo "stop [host]   -- Stop Redis Cluster instances."
+echo "watch [host]  -- Show CLUSTER NODES output (first 30 lines) of first node."
+echo "tail <id>     -- Run tail -f of instance at base port + ID."
+echo "call <cmd>    -- Run a redis-cli command on all cluster nodes."
+echo "clean         -- Remove all instances data, logs, configs."
+echo "clean-logs    -- Remove just instances logs."
