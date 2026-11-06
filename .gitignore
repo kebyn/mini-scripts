@@ -1,4 +1,39 @@
+# OS & Editor files
 .DS_Store
 .devcontainer
+.idea/
+.vscode/
+*.swp
 
+# Go build artifacts
 go.sum
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Python cache & artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+discourse-user-api-key.json
+
+# Rust build artifacts
+/rustlang/write_file
+foo.txt
+
+# Runtime & temporary files
+*.log
+*.aof
+*.rdb
+nodes*.conf
+upload.tmp
+download.tmp
+manifest.json
+token
+qrcode.png
