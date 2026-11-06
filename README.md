@@ -10,7 +10,7 @@
 
 | 一级目录 | 语言 / 技术栈 | 命名规范 | 说明 |
 | :--- | :--- | :--- | :--- |
-| [`bash/`](./bash/) | Bash / Shell | `kebab-case.sh` | Redis 集群管理、纯 TCP HTTP 请求、Docker 镜像批量导入导出及 Registry v2 脚本 |
+| [`bash/`](./bash/) | Bash / Shell | `kebab-case.sh` | 离线系统信息采集、Redis 集群管理、纯 TCP HTTP 请求、Docker 镜像批量导入导出及 Registry v2 脚本 |
 | [`docker/`](./docker/) | Dockerfile | `Dockerfile` / `<variant>.Dockerfile` | 常用 DNS 诊断与磁盘 I/O 压测工具镜像 |
 | [`golang/`](./golang/) | Go (`1.26`) | 子目录 `snake_case`，入口统一为 `main.go` | 独立 Go 实用命令行工具集 |
 | [`python/`](./python/) | Python 3 | PEP 8 `snake_case.py` | Discourse API Key 申请、带上传功能的 HTTP 服务、Docker Tag 查询等工具 |
@@ -32,6 +32,7 @@
 | [`docker-save-load-images.sh`](./bash/docker-save-load-images.sh) | 使用 `xargs -P 4` 并发批量导出（`ds`/`save`）与批量加载（`dl`/`load`）本地 Docker 镜像 |
 | [`get-image-manifest.sh`](./bash/get-image-manifest.sh) | 认证并下载 Docker Hub Registry v2 镜像的 Manifest 至 `manifest.json` |
 | [`reg-v2-cdn.sh`](./bash/reg-v2-cdn.sh) | 向 Docker Registry v2 推送 10MB 随机 Blob 并连续拉取 10 次以测试 Registry/CDN 性能 |
+| [`sysinfo.sh`](./bash/sysinfo.sh) | 离线采集主机基础信息（CPU/AES-NI/VM-x、内存、Swap、磁盘、发行版、内核、虚拟化及 IPv4/IPv6 状态，YABS-lite） |
 
 ---
 
