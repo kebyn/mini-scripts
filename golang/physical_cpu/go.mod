@@ -1,6 +1,6 @@
-module github.com/kebyn/mini-scripts/physicalCPU
+module github.com/kebyn/mini-scripts/physical_cpu
 
-go 1.15
+go 1.22.0
 
 require (
 	github.com/StackExchange/wmi v0.0.0-20210224194228-fe8f1750fd46 // indirect

@@ -2,38 +2,50 @@ package main
 
 import (
 	"flag"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
 	"time"
 )
 
-func listDir(name string) {
+func cleanExpiredFiles(dir string, expireDuration time.Duration) {
 	now := time.Now()
-	files, err := ioutil.ReadDir(name)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		log.Fatalf("List \t%v error: %v", name, err)
+		log.Printf("ReadDir %v error: %v", dir, err)
+		return
 	}
 
-	for _, file := range files {
-		fileName := filepath.Join(name, file.Name())
-		if file.IsDir() {
-			listDir(fileName)
+	for _, entry := range entries {
+		fullPath := filepath.Join(dir, entry.Name())
+		if entry.IsDir() {
+			cleanExpiredFiles(fullPath, expireDuration)
+			continue
 		}
-		if now.Sub(file.ModTime()) > (time.Duration(7*24) * time.Hour) {
-			err := os.Remove(fileName)
-			if err != nil {
-				log.Fatalf("Remove \t%v error: %v", fileName, err)
+		info, err := entry.Info()
+		if err != nil {
+			log.Printf("Stat %v error: %v", fullPath, err)
+			continue
+		}
+		if now.Sub(info.ModTime()) > expireDuration {
+			if err := os.Remove(fullPath); err != nil {
+				log.Printf("Remove %v error: %v", fullPath, err)
+				continue
 			}
-			log.Printf("Remove \t%v created by %v", fileName, file.ModTime())
+			log.Printf("Removed %v (modified at %v)", fullPath, info.ModTime())
 		}
 	}
 }
 
 func main() {
-	var path string
-	flag.StringVar(&path, "p", "./", "monitoring path")
+	var (
+		path string
+		days int
+	)
+	flag.StringVar(&path, "p", "./", "monitoring directory path")
+	flag.IntVar(&days, "d", 7, "expiration threshold in days")
 	flag.Parse()
-	listDir(path)
+
+	expireDuration := time.Duration(days*24) * time.Hour
+	cleanExpiredFiles(path, expireDuration)
 }

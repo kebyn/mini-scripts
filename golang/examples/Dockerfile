@@ -1,14 +1,14 @@
-FROM golang
+FROM golang:1.22-alpine
 
-WORKDIR /
+WORKDIR /app
 
-COPY golang/examples/main.go .
+COPY main.go go.mod ./
 
-RUN CGO_ENABLED=0 GOOS=linux go build main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-s -w" -o /main main.go
 
 FROM scratch
 
-COPY --from=0 /main /
+COPY --from=0 /main /main
 
 EXPOSE 8080
 
