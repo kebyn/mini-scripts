@@ -11,8 +11,8 @@
 | 一级目录 | 语言 / 技术栈 | 命名规范 | 说明 |
 | :--- | :--- | :--- | :--- |
 | [`bash/`](./bash/) | Bash / Shell | `kebab-case.sh` | Redis 集群管理、纯 TCP HTTP 请求、Docker 镜像批量导入导出及 Registry v2 脚本 |
-| [`docker/`](./docker/) | Dockerfile | `Dockerfile` / `<variant>.Dockerfile` | 常用诊断、压测工具及服务端构建镜像 |
-| [`golang/`](./golang/) | Go (`1.22`) | 子目录 `snake_case`，入口统一为 `main.go` | 独立 Go 实用命令行工具集 |
+| [`docker/`](./docker/) | Dockerfile | `Dockerfile` / `<variant>.Dockerfile` | 常用 DNS 诊断与磁盘 I/O 压测工具镜像 |
+| [`golang/`](./golang/) | Go (`1.26`) | 子目录 `snake_case`，入口统一为 `main.go` | 独立 Go 实用命令行工具集 |
 | [`python/`](./python/) | Python 3 | PEP 8 `snake_case.py` | Discourse API Key 申请、带上传功能的 HTTP 服务、Docker Tag 查询等工具 |
 | [`rustlang/`](./rustlang/) | Rust | `snake_case.rs` | Rust 代码片段与文件 I/O 示例 |
 
@@ -37,7 +37,7 @@
 
 ### 2. Go 实用工具 (`golang/`)
 
-每个子目录均为独立的 Go Module（`go 1.22.0`），入口文件统一为 `main.go`：
+每个子目录均为独立的 Go Module（`go 1.26.0`），入口文件统一为 `main.go`：
 
 | 子项目 | 功能说明 |
 | :--- | :--- |
@@ -68,10 +68,8 @@
 
 | 目录 | 基础镜像 | 功能说明 |
 | :--- | :--- | :--- |
-| [`docker/dnsutils`](./docker/dnsutils/) | `ubuntu` / `alpine` | 封装 `dig`、`nslookup`、`host` 等 DNS 诊断工具镜像 |
-| [`docker/fio`](./docker/fio/) | `centos:7` | 封装 `fio` 与 `libaio-devel` 磁盘 I/O 性能测试工具镜像 |
-| [`docker/taosdata/TDengine`](./docker/taosdata/TDengine/) | `gcc:latest` | 编译并运行 TDengine 时序数据库服务端（`kebyn/tdengine` / `kebyn/taosd`） |
-| [`docker/thegreatjavascript/FakeScreenshot`](./docker/thegreatjavascript/FakeScreenshot/) | `node:8-alpine` | 构建并运行 FakeScreenshot 网页端服务（`kebyn/fakescreenshot`，端口 `8000`） |
+| [`docker/dnsutils`](./docker/dnsutils/) | `ubuntu:24.04` / `alpine:3.21` | 封装 `dig`、`nslookup`、`host` 等 DNS 诊断工具镜像 |
+| [`docker/fio`](./docker/fio/) | `almalinux:9` | 封装 `fio` 与 `libaio-devel` 磁盘 I/O 性能测试工具镜像 |
 
 ---
 
