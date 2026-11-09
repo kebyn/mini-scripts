@@ -32,19 +32,19 @@ QEMU sources and build trees live in `/root/qemu-<tag>`. After a successful inst
 
 ```bash
 # Build QEMU (root required)
-curl -fsSL https://raw.githubusercontent.com/kebyn/sandbox/main/sandbox.sh \
+curl -fsSL https://raw.githubusercontent.com/kebyn/mini-scripts/master/bash/sandbox/sandbox.sh \
   | sudo bash -s -- bootstrap --qemu-version v11.1.2 --lang en
 
 # Foreground console (interactive terminal)
-curl -fsSL https://raw.githubusercontent.com/kebyn/sandbox/main/sandbox.sh \
+curl -fsSL https://raw.githubusercontent.com/kebyn/mini-scripts/master/bash/sandbox/sandbox.sh \
   | bash -s -- run --foreground --lang en
 
 # Background
-curl -fsSL https://raw.githubusercontent.com/kebyn/sandbox/main/sandbox.sh \
+curl -fsSL https://raw.githubusercontent.com/kebyn/mini-scripts/master/bash/sandbox/sandbox.sh \
   | bash -s -- run --background --lang en
 
 # Clean shutdown
-curl -fsSL https://raw.githubusercontent.com/kebyn/sandbox/main/sandbox.sh \
+curl -fsSL https://raw.githubusercontent.com/kebyn/mini-scripts/master/bash/sandbox/sandbox.sh \
   | bash -s -- stop
 ```
 
@@ -164,14 +164,14 @@ The Rocky image is about 520 MB; Debian is about 440 MB. `--disk` is sized dynam
 
 - `bash <(curl ...) run`: stdin stays attached to the terminal, so this runs in the foreground:
   ```bash
-  bash <(curl -fsSL https://raw.githubusercontent.com/kebyn/sandbox/main/sandbox.sh) run
+  bash <(curl -fsSL https://raw.githubusercontent.com/kebyn/mini-scripts/master/bash/sandbox/sandbox.sh) run
   ```
 - `curl ... | bash -s -- run --foreground`: attaches QEMU stdin to `/dev/tty`; a controlling terminal and terminal output are required. `--foreground` and `--background` are mutually exclusive.
 - `curl ... | bash -s -- run`: automatically uses background mode when stdin is not a TTY, matching the previous behavior.
 - CI, cron and `setsid` environments have no controlling terminal; use `--background`.
 - For a foreground console you can also download the script first:
   ```bash
-  curl -fsSL https://raw.githubusercontent.com/kebyn/sandbox/main/sandbox.sh -o sandbox.sh
+  curl -fsSL https://raw.githubusercontent.com/kebyn/mini-scripts/master/bash/sandbox/sandbox.sh -o sandbox.sh
   chmod +x sandbox.sh
   ./sandbox.sh run
   ```

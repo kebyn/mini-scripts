@@ -101,3 +101,25 @@ REPONAME="youruser/test-repo" ./reg-v2-cdn.sh
 ```bash
 ./sysinfo.sh
 ```
+
+---
+
+## 8. `sandbox/sandbox.sh` — QEMU + KVM + passt 云镜像沙箱启动工具
+
+从源码编译带 `passt` 支持的 QEMU，并使用 KVM + `passt` + `cloud-init`（Jinja 模板）快速启动 Debian 13、Ubuntu 24.04/26.04、Rocky 10、AlmaLinux 10、CentOS Stream 10、Fedora 44、openSUSE、Arch Linux、Alpine 3.23 等云镜像沙箱，支持中英双语输出（`--lang auto|zh|en`）与 `curl | bash` 管道运行。
+
+详细文档请参见 [`sandbox/README.zh.md`](./sandbox/README.zh.md)（中文）与 [`sandbox/README.md`](./sandbox/README.md)（English）。
+
+```bash
+# 编译安装 QEMU（需要 root）
+./sandbox/sandbox.sh bootstrap --qemu-version v11.1.2 --jobs "$(nproc)"
+
+# 后台启动默认 Debian 13 沙箱并等待 SSH 就绪
+./sandbox/sandbox.sh run --background
+
+# 查看支持的发行版列表
+./sandbox/sandbox.sh run --list-distros
+
+# 正常 ACPI 关机
+./sandbox/sandbox.sh stop
+```

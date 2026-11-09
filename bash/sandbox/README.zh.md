@@ -32,19 +32,19 @@ QEMU 源码和构建目录位于 `/root/qemu-<tag>`。安装成功后默认删�
 
 ```bash
 # 编译 QEMU（需要 root）
-curl -fsSL https://raw.githubusercontent.com/kebyn/sandbox/main/sandbox.sh \
+curl -fsSL https://raw.githubusercontent.com/kebyn/mini-scripts/master/bash/sandbox/sandbox.sh \
   | sudo bash -s -- bootstrap --qemu-version v11.1.2 --lang zh
 
 # 前台串口（交互式终端）
-curl -fsSL https://raw.githubusercontent.com/kebyn/sandbox/main/sandbox.sh \
+curl -fsSL https://raw.githubusercontent.com/kebyn/mini-scripts/master/bash/sandbox/sandbox.sh \
   | bash -s -- run --foreground --lang zh
 
 # 后台启动
-curl -fsSL https://raw.githubusercontent.com/kebyn/sandbox/main/sandbox.sh \
+curl -fsSL https://raw.githubusercontent.com/kebyn/mini-scripts/master/bash/sandbox/sandbox.sh \
   | bash -s -- run --background --lang zh
 
 # 正常关闭
-curl -fsSL https://raw.githubusercontent.com/kebyn/sandbox/main/sandbox.sh \
+curl -fsSL https://raw.githubusercontent.com/kebyn/mini-scripts/master/bash/sandbox/sandbox.sh \
   | bash -s -- stop
 ```
 
@@ -164,14 +164,14 @@ Rocky 镜像约 520 MB，Debian 镜像约 440 MB。`--disk` 默认按剩余空�
 
 - `bash <(curl ...) run`：stdin 仍是终端，直接前台运行：
   ```bash
-  bash <(curl -fsSL https://raw.githubusercontent.com/kebyn/sandbox/main/sandbox.sh) run
+  bash <(curl -fsSL https://raw.githubusercontent.com/kebyn/mini-scripts/master/bash/sandbox/sandbox.sh) run
   ```
 - `curl ... | bash -s -- run --foreground`：把 QEMU stdin 接到 `/dev/tty`，需要控制终端和终端输出。`--foreground` 与 `--background` 互斥。
 - `curl ... | bash -s -- run`：stdin 不是 TTY 时自动后台，行为和之前一致。
 - CI、cron、`setsid` 等没有控制终端的环境使用 `--background`。
 - 需要前台串口时，也可以先下载再运行：
   ```bash
-  curl -fsSL https://raw.githubusercontent.com/kebyn/sandbox/main/sandbox.sh -o sandbox.sh
+  curl -fsSL https://raw.githubusercontent.com/kebyn/mini-scripts/master/bash/sandbox/sandbox.sh -o sandbox.sh
   chmod +x sandbox.sh
   ./sandbox.sh run
   ```
