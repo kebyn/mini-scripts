@@ -5,9 +5,11 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"math/rand"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -26,10 +28,12 @@ import (
 const releaseSafetyBuffer = 2 * time.Minute
 
 var (
-	upperRegexp  = regexp.MustCompile(`[A-Z]`)
-	lowerRegexp  = regexp.MustCompile(`[a-z]`)
-	numberRegexp = regexp.MustCompile(`[0-9]`)
-	otherRegexp  = regexp.MustCompile(`[^0-9a-zA-Z]`)
+	upperRegexp       = regexp.MustCompile(`[A-Z]`)
+	lowerRegexp       = regexp.MustCompile(`[a-z]`)
+	numberRegexp      = regexp.MustCompile(`[0-9]`)
+	otherRegexp       = regexp.MustCompile(`[^0-9a-zA-Z]`)
+	almaVersionRegexp = regexp.MustCompile(`(?i)almalinux(?:\s+server|\s+linux)?[\s_-]*(\d+)(?:[._](\d+))?(?:[._](\d+))?`)
+	alibaseDateRegexp = regexp.MustCompile(`_(\d{8})\.vhd`)
 )
 
 // InstanceSummary holds normalized instance metadata across cloud providers.
@@ -45,6 +49,35 @@ type InstanceSummary struct {
 	ActionTimerIDs  []string
 }
 
+// ZoneSummary holds normalized availability zone metadata.
+type ZoneSummary struct {
+	Zone      string
+	ZoneID    string
+	Name      string
+	State     string
+	IsDefault bool
+}
+
+// PublicImageSummary holds normalized public OS image metadata across cloud providers.
+type PublicImageSummary struct {
+	ImageID     string
+	ImageName   string
+	OSName      string
+	Platform    string
+	Arch        string
+	SizeGiB     int64
+	CreatedTime string
+	ImageFamily string
+	IsDefault   bool
+}
+
+// CreateSpecOptions holds instance specification selection preferences for creation.
+type CreateSpecOptions struct {
+	CPU          int
+	Memory       float64
+	InstanceType string
+}
+
 func main() {
 	var (
 		provider    string
@@ -54,19 +87,37 @@ func main() {
 		hostname    string
 		releasetime int64
 		maxprice    float64
+		cpuFlag     int
+		memoryFlag  float64
+		typeFlag    string
 	)
 	flag.StringVar(&provider, "provider", "aliyun", "cloud provider: aliyun or tencent")
-	flag.StringVar(&action, "action", "create", "action to perform: create, list, delete, or extend")
+	flag.StringVar(&action, "action", "create", "action to perform: create, list, delete, extend, zones, or images")
 	flag.StringVar(&region, "region", "", "cloud region ID (default: cn-shanghai for aliyun, ap-shanghai for tencent)")
 	flag.StringVar(&idFlag, "id", "", "instance ID(s), comma-separated (required for delete/extend, optional for list)")
 	flag.StringVar(&hostname, "hostname", "example", "instance hostname (for create)")
 	flag.Int64Var(&releasetime, "releasetime", 1, "auto release duration in hours (for create/extend)")
 	flag.Float64Var(&maxprice, "maxprice", 0.98, "max spot price per hour (for create)")
+	flag.IntVar(&cpuFlag, "cpu", 1, "target vCPU core count for auto-selecting X86 instance type (for create)")
+	flag.Float64Var(&memoryFlag, "memory", 1, "target memory size in GiB for auto-selecting X86 instance type (for create)")
+	flag.StringVar(&typeFlag, "type", "", "preferred instance type (optional, overrides auto-selection priority when in stock)")
 	flag.Parse()
 
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	action = strings.ToLower(strings.TrimSpace(action))
+	switch action {
+	case "zone":
+		action = "zones"
+	case "image":
+		action = "images"
+	}
 	ids := parseInstanceIDs(idFlag)
+
+	explicitFlags := make(map[string]bool)
+	flag.Visit(func(f *flag.Flag) {
+		explicitFlags[f.Name] = true
+	})
+	specOpts := resolveCreateSpecOptions(provider, cpuFlag, memoryFlag, typeFlag, explicitFlags)
 
 	switch action {
 	case "create":
@@ -76,8 +127,14 @@ func main() {
 		if releasetime <= 0 {
 			log.Fatalf("invalid -releasetime %d: must be greater than 0", releasetime)
 		}
-	case "list":
-		// ids is optional filter
+		if specOpts.CPU <= 0 {
+			log.Fatalf("invalid -cpu %d: must be greater than 0", specOpts.CPU)
+		}
+		if specOpts.Memory <= 0 {
+			log.Fatalf("invalid -memory %.2f: must be greater than 0", specOpts.Memory)
+		}
+	case "list", "zones", "images":
+		// query actions
 	case "delete":
 		if len(ids) == 0 {
 			log.Fatal("-id is required for -action delete")
@@ -90,7 +147,7 @@ func main() {
 			log.Fatalf("invalid -releasetime %d: must be greater than 0 for -action extend", releasetime)
 		}
 	default:
-		log.Fatalf("unsupported action %q: must be 'create', 'list', 'delete', or 'extend'", action)
+		log.Fatalf("unsupported action %q: must be 'create', 'list', 'delete', 'extend', 'zones', or 'images'", action)
 	}
 
 	switch provider {
@@ -98,14 +155,63 @@ func main() {
 		if region == "" {
 			region = "cn-shanghai"
 		}
-		dispatchAliyun(action, region, hostname, releasetime, maxprice, ids)
+		dispatchAliyun(action, region, hostname, releasetime, maxprice, ids, specOpts)
 	case "tencent":
 		if region == "" {
 			region = "ap-shanghai"
 		}
-		dispatchTencent(action, region, hostname, releasetime, maxprice, ids)
+		dispatchTencent(action, region, hostname, releasetime, maxprice, ids, specOpts)
 	default:
 		log.Fatalf("unsupported provider %q: must be 'aliyun' or 'tencent'", provider)
+	}
+}
+
+func resolveCreateSpecOptions(provider string, cpuFlag int, memoryFlag float64, typeFlag string, explicitFlags map[string]bool) CreateSpecOptions {
+	opts := CreateSpecOptions{
+		CPU:          cpuFlag,
+		Memory:       memoryFlag,
+		InstanceType: strings.TrimSpace(typeFlag),
+	}
+
+	if !explicitFlags["cpu"] {
+		for _, envKey := range providerEnvKeys(provider, "CPU") {
+			if raw := strings.TrimSpace(os.Getenv(envKey)); raw != "" {
+				if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+					opts.CPU = v
+					break
+				}
+			}
+		}
+	}
+	if !explicitFlags["memory"] {
+		for _, envKey := range providerEnvKeys(provider, "MEMORY") {
+			if raw := strings.TrimSpace(os.Getenv(envKey)); raw != "" {
+				if v, err := strconv.ParseFloat(raw, 64); err == nil && v > 0 {
+					opts.Memory = v
+					break
+				}
+			}
+		}
+	}
+	if opts.InstanceType == "" {
+		for _, envKey := range providerEnvKeys(provider, "INSTANCE_TYPE") {
+			if raw := strings.TrimSpace(os.Getenv(envKey)); raw != "" {
+				opts.InstanceType = raw
+				break
+			}
+		}
+	}
+	return opts
+}
+
+func providerEnvKeys(provider, suffix string) []string {
+	switch provider {
+	case "aliyun":
+		return []string{"ALIBABA_CLOUD_" + suffix, "CLOUD_INSTANCE_" + suffix}
+	case "tencent":
+		return []string{"TENCENTCLOUD_" + suffix, "CLOUD_INSTANCE_" + suffix}
+	default:
+		return []string{"CLOUD_INSTANCE_" + suffix}
 	}
 }
 
@@ -203,7 +309,200 @@ func printInstanceTable(instances []InstanceSummary) {
 	_ = w.Flush()
 }
 
-func dispatchAliyun(action, region, hostname string, releasetime int64, maxprice float64, ids []string) {
+func printZoneTable(zones []ZoneSummary) {
+	if len(zones) == 0 {
+		fmt.Println("No zones found.")
+		return
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "ZONE\tZONE_ID\tNAME\tSTATE\tDEFAULT")
+	for _, z := range zones {
+		zoneID := z.ZoneID
+		if zoneID == "" {
+			zoneID = "-"
+		}
+		name := z.Name
+		if name == "" {
+			name = "-"
+		}
+		state := z.State
+		if state == "" {
+			state = "-"
+		}
+		defMark := "-"
+		if z.IsDefault {
+			defMark = "* (default)"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", z.Zone, zoneID, name, state, defMark)
+	}
+	_ = w.Flush()
+}
+
+func printImageTable(images []PublicImageSummary) {
+	if len(images) == 0 {
+		fmt.Println("No public images found.")
+		return
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "IMAGE_ID\tOS_NAME\tPLATFORM\tARCH\tSIZE_GIB\tCREATED_TIME\tDEFAULT")
+	for _, img := range images {
+		osName := img.OSName
+		if osName == "" {
+			osName = img.ImageName
+		}
+		if osName == "" {
+			osName = "-"
+		}
+		platform := img.Platform
+		if platform == "" {
+			platform = "-"
+		}
+		arch := img.Arch
+		if arch == "" {
+			arch = "-"
+		}
+		created := img.CreatedTime
+		if created == "" {
+			created = "-"
+		}
+		defMark := "-"
+		if img.IsDefault {
+			defMark = "* (default)"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
+			img.ImageID, osName, platform, arch, img.SizeGiB, created, defMark)
+	}
+	_ = w.Flush()
+}
+
+func isAlmaLinuxImage(texts ...string) bool {
+	for _, t := range texts {
+		if strings.Contains(strings.ToLower(t), "almalinux") {
+			return true
+		}
+	}
+	return false
+}
+
+// extractAlmaLinuxVersion parses the numeric [major, minor, patch] version of AlmaLinux (e.g. 10.1 -> [10, 1, 0])
+// across image metadata fields so 10.x is ranked higher than 9.x and 8.x.
+func extractAlmaLinuxVersion(texts ...string) [3]int {
+	var best [3]int
+	for _, text := range texts {
+		matches := almaVersionRegexp.FindAllStringSubmatch(text, -1)
+		for _, m := range matches {
+			var cur [3]int
+			if len(m) > 1 && m[1] != "" {
+				cur[0], _ = strconv.Atoi(m[1])
+			}
+			if len(m) > 2 && m[2] != "" {
+				cur[1], _ = strconv.Atoi(m[2])
+			}
+			if len(m) > 3 && m[3] != "" {
+				cur[2], _ = strconv.Atoi(m[3])
+			}
+			if compareVersionTuple(cur, best) > 0 {
+				best = cur
+			}
+		}
+	}
+	return best
+}
+
+func compareVersionTuple(a, b [3]int) int {
+	for i := 0; i < 3; i++ {
+		if a[i] != b[i] {
+			if a[i] > b[i] {
+				return 1
+			}
+			return -1
+		}
+	}
+	return 0
+}
+
+func extractImageCreatedTime(img PublicImageSummary) (time.Time, bool) {
+	if t, ok := parseCloudTime(img.CreatedTime); ok {
+		return t, true
+	}
+	if m := alibaseDateRegexp.FindStringSubmatch(img.ImageID); len(m) > 1 {
+		if t, err := time.Parse("20060102", m[1]); err == nil {
+			return t.UTC(), true
+		}
+	}
+	return time.Time{}, false
+}
+
+func comparePublicImageDesc(a, b PublicImageSummary) bool {
+	aAlma := isAlmaLinuxImage(a.Platform, a.OSName, a.ImageName, a.ImageFamily, a.ImageID)
+	bAlma := isAlmaLinuxImage(b.Platform, b.OSName, b.ImageName, b.ImageFamily, b.ImageID)
+	if aAlma != bAlma {
+		return aAlma
+	}
+
+	verA := extractAlmaLinuxVersion(a.OSName, a.ImageName, a.ImageFamily, a.ImageID)
+	verB := extractAlmaLinuxVersion(b.OSName, b.ImageName, b.ImageFamily, b.ImageID)
+	if cmp := compareVersionTuple(verA, verB); cmp != 0 {
+		return cmp > 0
+	}
+
+	timeA, okA := extractImageCreatedTime(a)
+	timeB, okB := extractImageCreatedTime(b)
+	if okA && okB && !timeA.Equal(timeB) {
+		return timeA.After(timeB)
+	}
+	if a.CreatedTime != b.CreatedTime && a.CreatedTime != "" && b.CreatedTime != "" {
+		return a.CreatedTime > b.CreatedTime
+	}
+	return a.ImageID > b.ImageID
+}
+
+func sortPublicImagesDesc(images []PublicImageSummary) {
+	sort.SliceStable(images, func(i, j int) bool {
+		return comparePublicImageDesc(images[i], images[j])
+	})
+	for i := range images {
+		images[i].IsDefault = (i == 0)
+	}
+}
+
+// AliyunVSwitchInfo holds metadata for an Aliyun VSwitch and its availability zone.
+type AliyunVSwitchInfo struct {
+	VSwitchID           string
+	ZoneID              string
+	VpcID               string
+	AvailableIPCount    int64
+	IsPreferredVSwitch  bool
+	IsPreferredZone     bool
+}
+
+// AliyunInstanceTypeSpec holds normalized hardware metadata from DescribeInstanceTypes.
+type AliyunInstanceTypeSpec struct {
+	InstanceType string
+	CPU          int
+	Memory       float64
+	Family       string
+	FamilyLevel  string
+}
+
+// AliyunCandidate represents a ranked Aliyun spot instance creation candidate.
+type AliyunCandidate struct {
+	VSwitchID          string
+	ZoneID             string
+	InstanceType       string
+	SystemDiskCategory string
+	CPU                int
+	Memory             float64
+	Family             string
+	SpotPrice          float64
+	StockCategory      string
+	ExplicitMatch      bool
+	ExactMatch         bool
+	PreferredVSwitch   bool
+	PreferredZone      bool
+}
+
+func dispatchAliyun(action, region, hostname string, releasetime int64, maxprice float64, ids []string, specOpts CreateSpecOptions) {
 	accessKeyID := os.Getenv("ALIBABA_CLOUD_ACCESS_KEY_ID")
 	accessKeySecret := os.Getenv("ALIBABA_CLOUD_ACCESS_KEY_SECRET")
 	if accessKeyID == "" || accessKeySecret == "" {
@@ -218,13 +517,25 @@ func dispatchAliyun(action, region, hostname string, releasetime int64, maxprice
 	switch action {
 	case "create":
 		password := Randpassword(12)
-		runAliyun(ecsClient, region, hostname, password, releasetime, maxprice)
+		runAliyun(ecsClient, region, hostname, password, releasetime, maxprice, specOpts)
 	case "list":
 		instances, err := FetchAliyunInstances(ecsClient, region, ids)
 		if err != nil {
 			log.Panicf("%v", err)
 		}
 		printInstanceTable(instances)
+	case "zones":
+		zones, err := FetchAliyunZones(ecsClient, region)
+		if err != nil {
+			log.Panicf("%v", err)
+		}
+		printZoneTable(zones)
+	case "images":
+		images, err := FetchAliyunPublicImages(ecsClient, region, specOpts.InstanceType)
+		if err != nil {
+			log.Panicf("%v", err)
+		}
+		printImageTable(images)
 	case "delete":
 		if err := DeleteAliyunInstances(ecsClient, ids); err != nil {
 			log.Panicf("%v", err)
@@ -236,13 +547,15 @@ func dispatchAliyun(action, region, hostname string, releasetime int64, maxprice
 	}
 }
 
-func runAliyun(ecsClient *ecs.Client, region, hostname, password string, releasetime int64, maxprice float64) {
-	if os.Getenv("ALIBABA_CLOUD_SECURITY_GROUP_ID") == "" || os.Getenv("ALIBABA_CLOUD_VSWITCH_ID") == "" {
-		log.Fatal("environment variables ALIBABA_CLOUD_SECURITY_GROUP_ID and ALIBABA_CLOUD_VSWITCH_ID are required for creating an Aliyun instance")
+func runAliyun(ecsClient *ecs.Client, region, hostname, password string, releasetime int64, maxprice float64, specOpts CreateSpecOptions) {
+	securityGroupID := strings.TrimSpace(os.Getenv("ALIBABA_CLOUD_SECURITY_GROUP_ID"))
+	preferredVSwitchID := strings.TrimSpace(os.Getenv("ALIBABA_CLOUD_VSWITCH_ID"))
+	if securityGroupID == "" {
+		log.Fatal("environment variable ALIBABA_CLOUD_SECURITY_GROUP_ID is required for creating an Aliyun instance")
 	}
 
 	createStartTime := time.Now().UTC()
-	instanceid, err := Createinstance(ecsClient, region, hostname, password, maxprice)
+	instanceid, err := CreateinstanceWithOptions(ecsClient, region, hostname, password, maxprice, securityGroupID, preferredVSwitchID, specOpts)
 	if err != nil {
 		log.Panicf("%v", err)
 	}
@@ -306,18 +619,82 @@ func NewAliyunClient(region, accessKeyID, accessKeySecret string) (*ecs.Client, 
 	return ecs.NewClient(config)
 }
 
-// Createinstance creates a spot ECS instance on Alibaba Cloud.
+// Createinstance creates a spot ECS instance on Alibaba Cloud using default 1C1G X86 auto-selection.
 func Createinstance(ecsClient *ecs.Client, region, hostname, password string, maxprice float64) (instanceid string, err error) {
+	specOpts := resolveCreateSpecOptions("aliyun", 1, 1, "", nil)
+	return CreateinstanceWithOptions(
+		ecsClient,
+		region,
+		hostname,
+		password,
+		maxprice,
+		strings.TrimSpace(os.Getenv("ALIBABA_CLOUD_SECURITY_GROUP_ID")),
+		strings.TrimSpace(os.Getenv("ALIBABA_CLOUD_VSWITCH_ID")),
+		specOpts,
+	)
+}
+
+// CreateinstanceWithOptions selects an in-stock X86 instance type and VSwitch (with cross-zone fallback) and creates a spot ECS instance.
+func CreateinstanceWithOptions(ecsClient *ecs.Client, region, hostname, password string, maxprice float64, securityGroupID, preferredVSwitchID string, specOpts CreateSpecOptions) (string, error) {
+	vswitches, err := ResolveAliyunVSwitches(ecsClient, region, securityGroupID, preferredVSwitchID)
+	if err != nil {
+		return "", err
+	}
+
+	candidates, err := SelectAliyunCandidates(ecsClient, region, vswitches, specOpts, maxprice)
+	if err != nil {
+		return "", err
+	}
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("no available Aliyun spot instance types in stock for region=%s (target=%dC%.1fG, type=%q, maxprice=%.4f)",
+			region, specOpts.CPU, specOpts.Memory, specOpts.InstanceType, maxprice)
+	}
+
+	imageID := ResolveAliyunPublicImage(ecsClient, region, "")
+
+	var lastErr error
+	for idx, cand := range candidates {
+		diskCategories := ResolveAliyunSystemDiskCategories(ecsClient, region, cand.ZoneID, cand.InstanceType)
+		for _, diskCategory := range diskCategories {
+			candWithDisk := cand
+			candWithDisk.SystemDiskCategory = diskCategory
+			log.Printf("[aliyun][candidate %d/%d] trying zone=%s vswitch=%s type=%s (%dC%.1fG) disk=%s spotPrice=%.4f",
+				idx+1, len(candidates), candWithDisk.ZoneID, candWithDisk.VSwitchID,
+				candWithDisk.InstanceType, candWithDisk.CPU, candWithDisk.Memory,
+				candWithDisk.SystemDiskCategory, candWithDisk.SpotPrice)
+
+			instanceID, createErr := createSingleAliyunInstance(ecsClient, region, securityGroupID, hostname, password, maxprice, imageID, candWithDisk)
+			if createErr == nil {
+				return instanceID, nil
+			}
+			lastErr = createErr
+			if isAliyunDiskCategoryError(createErr) {
+				log.Printf("[aliyun] system disk category %s unsupported/no-stock for %s in %s, trying next disk category: %v",
+					diskCategory, cand.InstanceType, cand.ZoneID, createErr)
+				continue
+			}
+			if isAliyunRetryableCreateError(createErr) {
+				log.Printf("[aliyun] candidate %s in %s (vswitch=%s) unavailable, falling back to next candidate: %v",
+					cand.InstanceType, cand.ZoneID, cand.VSwitchID, createErr)
+				break
+			}
+			return "", createErr
+		}
+	}
+	return "", fmt.Errorf("all %d Aliyun spot candidates failed in region %s; last error: %w", len(candidates), region, lastErr)
+}
+
+func createSingleAliyunInstance(ecsClient *ecs.Client, region, securityGroupID, hostname, password string, maxprice float64, imageID string, cand AliyunCandidate) (string, error) {
 	request := &ecs.CreateInstanceRequest{
 		RegionId:                    tea.String(region),
-		ImageFamily:                 tea.String("acs:almalinux_9_2_x64"),
-		InstanceType:                tea.String("ecs.u1-c1m1.large"),
-		SecurityGroupId:             tea.String(os.Getenv("ALIBABA_CLOUD_SECURITY_GROUP_ID")),
+		ZoneId:                      tea.String(cand.ZoneID),
+		InstanceType:                tea.String(cand.InstanceType),
+		SecurityGroupId:             tea.String(securityGroupID),
 		InternetChargeType:          tea.String("PayByTraffic"),
 		InternetMaxBandwidthIn:      tea.Int32(100),
 		InternetMaxBandwidthOut:     tea.Int32(100),
 		IoOptimized:                 tea.String("optimized"),
-		VSwitchId:                   tea.String(os.Getenv("ALIBABA_CLOUD_VSWITCH_ID")),
+		VSwitchId:                   tea.String(cand.VSwitchID),
 		InstanceChargeType:          tea.String("PostPaid"),
 		SpotStrategy:                tea.String("SpotWithPriceLimit"),
 		SpotPriceLimit:              tea.Float32(float32(maxprice)),
@@ -326,17 +703,688 @@ func Createinstance(ecsClient *ecs.Client, region, hostname, password string, ma
 		InstanceName:                tea.String(hostname),
 		SecurityEnhancementStrategy: tea.String("Deactive"),
 	}
+	if imageID != "" {
+		request.ImageId = tea.String(imageID)
+	} else {
+		request.ImageFamily = tea.String("acs:almalinux_9_2_x64")
+	}
+	if cand.SystemDiskCategory != "" {
+		request.SystemDisk = &ecs.CreateInstanceRequestSystemDisk{
+			Category: tea.String(cand.SystemDiskCategory),
+		}
+	}
 	response, err := ecsClient.CreateInstance(request)
 	if err != nil {
 		return "", err
 	}
-	instanceid = tea.StringValue(response.Body.InstanceId)
-	log.Printf("success(%d)! requestId = %s\t instanceId = %s",
+	instanceid := tea.StringValue(response.Body.InstanceId)
+	log.Printf("success(%d)! requestId = %s\t instanceId = %s\t zone = %s\t type = %s\t disk = %s",
 		tea.Int32Value(response.StatusCode),
 		tea.StringValue(response.Body.RequestId),
 		instanceid,
+		cand.ZoneID,
+		cand.InstanceType,
+		cand.SystemDiskCategory,
 	)
 	return instanceid, nil
+}
+
+// FetchAliyunZones queries availability zones in the Aliyun region.
+func FetchAliyunZones(ecsClient *ecs.Client, region string) ([]ZoneSummary, error) {
+	req := &ecs.DescribeZonesRequest{
+		RegionId: tea.String(region),
+	}
+	resp, err := ecsClient.DescribeZones(req)
+	if err != nil {
+		return nil, fmt.Errorf("DescribeZones failed: %w", err)
+	}
+	var zones []ZoneSummary
+	if resp.Body == nil || resp.Body.Zones == nil {
+		return zones, nil
+	}
+	for _, z := range resp.Body.Zones.Zone {
+		if z == nil {
+			continue
+		}
+		zoneID := tea.StringValue(z.ZoneId)
+		if zoneID == "" {
+			continue
+		}
+		state := "AVAILABLE"
+		if z.AvailableResourceCreation != nil && len(z.AvailableResourceCreation.ResourceTypes) == 0 {
+			state = "LIMITED"
+		}
+		zones = append(zones, ZoneSummary{
+			Zone:   zoneID,
+			ZoneID: zoneID,
+			Name:   tea.StringValue(z.LocalName),
+			State:  state,
+		})
+	}
+	sort.SliceStable(zones, func(i, j int) bool {
+		return zones[i].Zone > zones[j].Zone
+	})
+	if len(zones) > 0 {
+		zones[0].IsDefault = true
+	}
+	return zones, nil
+}
+
+// FetchAliyunPublicImages queries official Aliyun public x86_64 AlmaLinux images and ranks the latest version first.
+func FetchAliyunPublicImages(ecsClient *ecs.Client, region, instanceType string) ([]PublicImageSummary, error) {
+	var allAlma []PublicImageSummary
+	pageNumber := int32(1)
+	pageSize := int32(100)
+
+	for {
+		req := &ecs.DescribeImagesRequest{
+			RegionId:        tea.String(region),
+			ImageOwnerAlias: tea.String("system"),
+			OSType:          tea.String("linux"),
+			Architecture:    tea.String("x86_64"),
+			Status:          tea.String("Available"),
+			ActionType:      tea.String("CreateEcs"),
+			PageNumber:      tea.Int32(pageNumber),
+			PageSize:        tea.Int32(pageSize),
+		}
+		if instanceType != "" {
+			req.InstanceType = tea.String(instanceType)
+		}
+		resp, err := ecsClient.DescribeImages(req)
+		if err != nil {
+			return nil, fmt.Errorf("DescribeImages failed: %w", err)
+		}
+		if resp.Body == nil || resp.Body.Images == nil || len(resp.Body.Images.Image) == 0 {
+			break
+		}
+		for _, img := range resp.Body.Images.Image {
+			if img == nil {
+				continue
+			}
+			imageID := tea.StringValue(img.ImageId)
+			imageName := tea.StringValue(img.ImageName)
+			osName := tea.StringValue(img.OSNameEn)
+			if osName == "" {
+				osName = tea.StringValue(img.OSName)
+			}
+			platform := tea.StringValue(img.Platform)
+			family := tea.StringValue(img.ImageFamily)
+			if !isAlmaLinuxImage(platform, osName, imageName, family, imageID) {
+				continue
+			}
+			allAlma = append(allAlma, PublicImageSummary{
+				ImageID:     imageID,
+				ImageName:   imageName,
+				OSName:      osName,
+				Platform:    platform,
+				Arch:        tea.StringValue(img.Architecture),
+				SizeGiB:     int64(tea.Int32Value(img.Size)),
+				CreatedTime: tea.StringValue(img.CreationTime),
+				ImageFamily: family,
+			})
+		}
+		total := tea.Int32Value(resp.Body.TotalCount)
+		if pageNumber*pageSize >= total || len(resp.Body.Images.Image) < int(pageSize) {
+			break
+		}
+		pageNumber++
+	}
+
+	sortPublicImagesDesc(allAlma)
+	return allAlma, nil
+}
+
+// ResolveAliyunPublicImage resolves the latest x86_64 AlmaLinux public image ID in the Aliyun region.
+func ResolveAliyunPublicImage(ecsClient *ecs.Client, region, instanceType string) string {
+	if fixed := strings.TrimSpace(os.Getenv("ALIBABA_CLOUD_IMAGE_ID")); fixed != "" {
+		return fixed
+	}
+	images, err := FetchAliyunPublicImages(ecsClient, region, instanceType)
+	if err != nil || len(images) == 0 {
+		return ""
+	}
+	log.Printf("resolved latest Aliyun public image: %s (%s)", images[0].ImageID, images[0].OSName)
+	return images[0].ImageID
+}
+
+// ResolveAliyunVSwitches discovers available VSwitches in the same VPC as the preferred VSwitch or Security Group.
+func ResolveAliyunVSwitches(ecsClient *ecs.Client, region, securityGroupID, preferredVSwitchID string) ([]AliyunVSwitchInfo, error) {
+	var (
+		vpcID         string
+		preferredZone string
+		vswitches     []AliyunVSwitchInfo
+		seen          = make(map[string]bool)
+	)
+
+	if preferredVSwitchID != "" {
+		req := &ecs.DescribeVSwitchesRequest{
+			RegionId:  tea.String(region),
+			VSwitchId: tea.String(preferredVSwitchID),
+		}
+		resp, err := ecsClient.DescribeVSwitches(req)
+		if err != nil {
+			return nil, fmt.Errorf("describe preferred vswitch %s failed: %w", preferredVSwitchID, err)
+		}
+		if resp.Body != nil && resp.Body.VSwitches != nil && len(resp.Body.VSwitches.VSwitch) > 0 {
+			vsw := resp.Body.VSwitches.VSwitch[0]
+			if vsw != nil {
+				vpcID = tea.StringValue(vsw.VpcId)
+				preferredZone = tea.StringValue(vsw.ZoneId)
+				vswID := tea.StringValue(vsw.VSwitchId)
+				seen[vswID] = true
+				vswitches = append(vswitches, AliyunVSwitchInfo{
+					VSwitchID:          vswID,
+					ZoneID:             preferredZone,
+					VpcID:              vpcID,
+					AvailableIPCount:   tea.Int64Value(vsw.AvailableIpAddressCount),
+					IsPreferredVSwitch: true,
+					IsPreferredZone:    true,
+				})
+			}
+		}
+	}
+
+	if vpcID == "" && securityGroupID != "" {
+		sgReq := &ecs.DescribeSecurityGroupAttributeRequest{
+			RegionId:        tea.String(region),
+			SecurityGroupId: tea.String(securityGroupID),
+		}
+		sgResp, err := ecsClient.DescribeSecurityGroupAttribute(sgReq)
+		if err == nil && sgResp.Body != nil {
+			vpcID = tea.StringValue(sgResp.Body.VpcId)
+		}
+	}
+
+	if vpcID != "" {
+		pageNumber := int32(1)
+		pageSize := int32(50)
+		for {
+			req := &ecs.DescribeVSwitchesRequest{
+				RegionId:   tea.String(region),
+				VpcId:      tea.String(vpcID),
+				PageNumber: tea.Int32(pageNumber),
+				PageSize:   tea.Int32(pageSize),
+			}
+			resp, err := ecsClient.DescribeVSwitches(req)
+			if err != nil || resp.Body == nil || resp.Body.VSwitches == nil || len(resp.Body.VSwitches.VSwitch) == 0 {
+				break
+			}
+			for _, vsw := range resp.Body.VSwitches.VSwitch {
+				if vsw == nil {
+					continue
+				}
+				vswID := tea.StringValue(vsw.VSwitchId)
+				status := tea.StringValue(vsw.Status)
+				availIPs := tea.Int64Value(vsw.AvailableIpAddressCount)
+				if vswID == "" || seen[vswID] {
+					continue
+				}
+				if status != "" && status != "Available" {
+					continue
+				}
+				if availIPs <= 0 {
+					continue
+				}
+				zoneID := tea.StringValue(vsw.ZoneId)
+				seen[vswID] = true
+				vswitches = append(vswitches, AliyunVSwitchInfo{
+					VSwitchID:          vswID,
+					ZoneID:             zoneID,
+					VpcID:              tea.StringValue(vsw.VpcId),
+					AvailableIPCount:   availIPs,
+					IsPreferredVSwitch: vswID == preferredVSwitchID,
+					IsPreferredZone:    preferredZone != "" && zoneID == preferredZone,
+				})
+			}
+			total := tea.Int32Value(resp.Body.TotalCount)
+			if pageNumber*pageSize >= total || len(resp.Body.VSwitches.VSwitch) < int(pageSize) {
+				break
+			}
+			pageNumber++
+		}
+	}
+
+	if len(vswitches) == 0 {
+		return nil, fmt.Errorf("no available VSwitches found in region %s (preferred VSwitch=%q, SecurityGroup=%q); please check ALIBABA_CLOUD_VSWITCH_ID",
+			region, preferredVSwitchID, securityGroupID)
+	}
+
+	sort.SliceStable(vswitches, func(i, j int) bool {
+		if vswitches[i].IsPreferredVSwitch != vswitches[j].IsPreferredVSwitch {
+			return vswitches[i].IsPreferredVSwitch
+		}
+		if vswitches[i].IsPreferredZone != vswitches[j].IsPreferredZone {
+			return vswitches[i].IsPreferredZone
+		}
+		if vswitches[i].AvailableIPCount != vswitches[j].AvailableIPCount {
+			return vswitches[i].AvailableIPCount > vswitches[j].AvailableIPCount
+		}
+		return vswitches[i].VSwitchID < vswitches[j].VSwitchID
+	})
+	return vswitches, nil
+}
+
+// FetchAliyunX86InstanceTypes queries DescribeInstanceTypes for X86 cloud-disk-compatible instance specs.
+func FetchAliyunX86InstanceTypes(ecsClient *ecs.Client, preferredType string) (map[string]AliyunInstanceTypeSpec, error) {
+	specs := make(map[string]AliyunInstanceTypeSpec)
+	var nextToken string
+
+	for {
+		req := &ecs.DescribeInstanceTypesRequest{
+			CpuArchitecture: tea.String("X86"),
+			MaxResults:      tea.Int64(1600),
+		}
+		if nextToken != "" {
+			req.NextToken = tea.String(nextToken)
+		}
+		resp, err := ecsClient.DescribeInstanceTypes(req)
+		if err != nil {
+			return nil, fmt.Errorf("DescribeInstanceTypes failed: %w", err)
+		}
+		if resp.Body == nil || resp.Body.InstanceTypes == nil || len(resp.Body.InstanceTypes.InstanceType) == 0 {
+			break
+		}
+		for _, it := range resp.Body.InstanceTypes.InstanceType {
+			if it == nil {
+				continue
+			}
+			typeID := tea.StringValue(it.InstanceTypeId)
+			if typeID == "" {
+				continue
+			}
+			if typeID != preferredType {
+				if tea.Int32Value(it.GPUAmount) > 0 {
+					continue
+				}
+				if tea.Int32Value(it.LocalStorageAmount) > 0 {
+					continue
+				}
+			}
+			specs[typeID] = AliyunInstanceTypeSpec{
+				InstanceType: typeID,
+				CPU:          int(tea.Int32Value(it.CpuCoreCount)),
+				Memory:       float64(tea.Float32Value(it.MemorySize)),
+				Family:       tea.StringValue(it.InstanceTypeFamily),
+				FamilyLevel:  tea.StringValue(it.InstanceFamilyLevel),
+			}
+		}
+		nextToken = tea.StringValue(resp.Body.NextToken)
+		if nextToken == "" {
+			break
+		}
+	}
+	return specs, nil
+}
+
+// FetchAliyunAvailableInstanceTypesByZone queries DescribeAvailableResource for in-stock spot instance types across all zones in the region.
+func FetchAliyunAvailableInstanceTypesByZone(ecsClient *ecs.Client, region string) (map[string]map[string]string, error) {
+	req := &ecs.DescribeAvailableResourceRequest{
+		RegionId:            tea.String(region),
+		DestinationResource: tea.String("InstanceType"),
+		ResourceType:        tea.String("instance"),
+		InstanceChargeType:  tea.String("PostPaid"),
+		SpotStrategy:        tea.String("SpotWithPriceLimit"),
+		IoOptimized:         tea.String("optimized"),
+		NetworkCategory:     tea.String("vpc"),
+	}
+	resp, err := ecsClient.DescribeAvailableResource(req)
+	if err != nil {
+		return nil, fmt.Errorf("DescribeAvailableResource failed: %w", err)
+	}
+
+	zoneStock := make(map[string]map[string]string)
+	if resp.Body == nil || resp.Body.AvailableZones == nil {
+		return zoneStock, nil
+	}
+	for _, az := range resp.Body.AvailableZones.AvailableZone {
+		if az == nil {
+			continue
+		}
+		zoneID := tea.StringValue(az.ZoneId)
+		zoneStatus := tea.StringValue(az.Status)
+		zoneCategory := tea.StringValue(az.StatusCategory)
+		if zoneID == "" || zoneStatus != "Available" || zoneCategory == "WithoutStock" || zoneCategory == "ClosedWithoutStock" {
+			continue
+		}
+		if az.AvailableResources == nil {
+			continue
+		}
+		for _, ar := range az.AvailableResources.AvailableResource {
+			if ar == nil || ar.SupportedResources == nil {
+				continue
+			}
+			for _, sr := range ar.SupportedResources.SupportedResource {
+				if sr == nil {
+					continue
+				}
+				instType := tea.StringValue(sr.Value)
+				status := tea.StringValue(sr.Status)
+				category := tea.StringValue(sr.StatusCategory)
+				if instType == "" || status != "Available" {
+					continue
+				}
+				if category != "WithStock" && category != "MoreThanStock" {
+					continue
+				}
+				if zoneStock[zoneID] == nil {
+					zoneStock[zoneID] = make(map[string]string)
+				}
+				zoneStock[zoneID][instType] = category
+			}
+		}
+	}
+	return zoneStock, nil
+}
+
+// ResolveAliyunSystemDiskCategories returns supported and in-stock system disk categories for a (ZoneId, InstanceType), ordered by cost-effectiveness.
+func ResolveAliyunSystemDiskCategories(ecsClient *ecs.Client, region, zoneID, instanceType string) []string {
+	req := &ecs.DescribeAvailableResourceRequest{
+		RegionId:            tea.String(region),
+		ZoneId:              tea.String(zoneID),
+		DestinationResource: tea.String("SystemDisk"),
+		ResourceType:        tea.String("instance"),
+		InstanceChargeType:  tea.String("PostPaid"),
+		SpotStrategy:        tea.String("SpotWithPriceLimit"),
+		InstanceType:        tea.String(instanceType),
+		IoOptimized:         tea.String("optimized"),
+		NetworkCategory:     tea.String("vpc"),
+	}
+	resp, err := ecsClient.DescribeAvailableResource(req)
+	var available []string
+	if err == nil && resp.Body != nil && resp.Body.AvailableZones != nil {
+		for _, az := range resp.Body.AvailableZones.AvailableZone {
+			if az == nil || az.AvailableResources == nil {
+				continue
+			}
+			for _, ar := range az.AvailableResources.AvailableResource {
+				if ar == nil || ar.SupportedResources == nil {
+					continue
+				}
+				for _, sr := range ar.SupportedResources.SupportedResource {
+					if sr == nil {
+						continue
+					}
+					val := tea.StringValue(sr.Value)
+					status := tea.StringValue(sr.Status)
+					cat := tea.StringValue(sr.StatusCategory)
+					if val != "" && status == "Available" && (cat == "WithStock" || cat == "MoreThanStock") {
+						available = append(available, val)
+					}
+				}
+			}
+		}
+	}
+	return rankSystemDiskCategories(available, instanceType)
+}
+
+func rankSystemDiskCategories(available []string, instanceType string) []string {
+	priority := map[string]int{
+		"cloud_essd_entry": 1,
+		"cloud_efficiency": 2,
+		"cloud_auto":       3,
+		"cloud_essd":       4,
+		"cloud_ssd":        5,
+		"cloud":            6,
+	}
+	if len(available) == 0 {
+		if strings.HasPrefix(instanceType, "ecs.u1") || strings.HasPrefix(instanceType, "ecs.e") {
+			return []string{"cloud_essd_entry", "cloud_essd", "cloud_auto", "cloud_efficiency"}
+		}
+		return []string{"cloud_efficiency", "cloud_essd", "cloud_auto", "cloud_ssd"}
+	}
+	seen := make(map[string]bool, len(available))
+	var unique []string
+	for _, cat := range available {
+		if !seen[cat] {
+			seen[cat] = true
+			unique = append(unique, cat)
+		}
+	}
+	sort.SliceStable(unique, func(i, j int) bool {
+		pi, oki := priority[unique[i]]
+		if !oki {
+			pi = 99
+		}
+		pj, okj := priority[unique[j]]
+		if !okj {
+			pj = 99
+		}
+		if pi != pj {
+			return pi < pj
+		}
+		return unique[i] < unique[j]
+	})
+	return unique
+}
+
+// SelectAliyunCandidates filters, prices, and ranks available Aliyun spot instance candidates across the VPC's VSwitches.
+func SelectAliyunCandidates(ecsClient *ecs.Client, region string, vswitches []AliyunVSwitchInfo, opts CreateSpecOptions, maxprice float64) ([]AliyunCandidate, error) {
+	specs, err := FetchAliyunX86InstanceTypes(ecsClient, opts.InstanceType)
+	if err != nil {
+		return nil, err
+	}
+	zoneStock, err := FetchAliyunAvailableInstanceTypesByZone(ecsClient, region)
+	if err != nil {
+		return nil, err
+	}
+
+	candidates := buildAliyunCandidates(vswitches, specs, zoneStock, opts)
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+
+	// Enrich top candidates with real-time spot prices via DescribeSpotPriceHistory
+	type zoneTypeKey struct {
+		zoneID       string
+		instanceType string
+	}
+	priceCache := make(map[zoneTypeKey]float64)
+	const maxPriceQueries = 24
+	queries := 0
+	for i := range candidates {
+		key := zoneTypeKey{zoneID: candidates[i].ZoneID, instanceType: candidates[i].InstanceType}
+		if price, ok := priceCache[key]; ok {
+			candidates[i].SpotPrice = price
+			continue
+		}
+		if queries >= maxPriceQueries {
+			continue
+		}
+		queries++
+		price := queryAliyunSpotPrice(ecsClient, region, candidates[i].ZoneID, candidates[i].InstanceType)
+		priceCache[key] = price
+		candidates[i].SpotPrice = price
+	}
+
+	filtered := filterAndSortAliyunCandidates(candidates, maxprice)
+	return filtered, nil
+}
+
+func queryAliyunSpotPrice(ecsClient *ecs.Client, region, zoneID, instanceType string) float64 {
+	req := &ecs.DescribeSpotPriceHistoryRequest{
+		RegionId:     tea.String(region),
+		ZoneId:       tea.String(zoneID),
+		InstanceType: tea.String(instanceType),
+		NetworkType:  tea.String("vpc"),
+		IoOptimized:  tea.String("optimized"),
+		OSType:       tea.String("linux"),
+	}
+	resp, err := ecsClient.DescribeSpotPriceHistory(req)
+	if err != nil || resp.Body == nil || resp.Body.SpotPrices == nil || len(resp.Body.SpotPrices.SpotPriceType) == 0 {
+		return 0
+	}
+	var latestPrice float64
+	var latestTime string
+	for _, item := range resp.Body.SpotPrices.SpotPriceType {
+		if item == nil || item.SpotPrice == nil {
+			continue
+		}
+		ts := tea.StringValue(item.Timestamp)
+		p := float64(tea.Float32Value(item.SpotPrice))
+		if p > 0 && (latestTime == "" || ts >= latestTime) {
+			latestTime = ts
+			latestPrice = p
+		}
+	}
+	return latestPrice
+}
+
+func buildAliyunCandidates(vswitches []AliyunVSwitchInfo, specs map[string]AliyunInstanceTypeSpec, zoneStock map[string]map[string]string, opts CreateSpecOptions) []AliyunCandidate {
+	var candidates []AliyunCandidate
+	for _, vsw := range vswitches {
+		inStockMap := zoneStock[vsw.ZoneID]
+		if len(inStockMap) == 0 {
+			continue
+		}
+		for instType, stockCat := range inStockMap {
+			spec, ok := specs[instType]
+			if !ok {
+				continue
+			}
+			explicitMatch := opts.InstanceType != "" && strings.EqualFold(instType, opts.InstanceType)
+			exactMatch := spec.CPU == opts.CPU && math.Abs(spec.Memory-opts.Memory) < 0.01
+			upwardMatch := spec.CPU >= opts.CPU && spec.Memory+0.01 >= opts.Memory &&
+				spec.CPU <= maxInt(opts.CPU*4, 4) && spec.Memory <= math.Max(opts.Memory*4, 8.0)
+
+			if !explicitMatch && !exactMatch && !upwardMatch {
+				continue
+			}
+			candidates = append(candidates, AliyunCandidate{
+				VSwitchID:        vsw.VSwitchID,
+				ZoneID:           vsw.ZoneID,
+				InstanceType:     instType,
+				CPU:              spec.CPU,
+				Memory:           spec.Memory,
+				Family:           spec.Family,
+				StockCategory:    stockCat,
+				ExplicitMatch:    explicitMatch,
+				ExactMatch:       exactMatch,
+				PreferredVSwitch: vsw.IsPreferredVSwitch,
+				PreferredZone:    vsw.IsPreferredZone,
+			})
+		}
+	}
+	sortAliyunCandidates(candidates)
+	return candidates
+}
+
+func filterAndSortAliyunCandidates(candidates []AliyunCandidate, maxprice float64) []AliyunCandidate {
+	var withinBudget []AliyunCandidate
+	for _, c := range candidates {
+		if c.SpotPrice > 0 && c.SpotPrice > maxprice {
+			continue
+		}
+		withinBudget = append(withinBudget, c)
+	}
+	if len(withinBudget) == 0 {
+		withinBudget = candidates
+	}
+	sortAliyunCandidates(withinBudget)
+	return withinBudget
+}
+
+func sortAliyunCandidates(candidates []AliyunCandidate) {
+	sort.SliceStable(candidates, func(i, j int) bool {
+		a, b := candidates[i], candidates[j]
+		if a.ExplicitMatch != b.ExplicitMatch {
+			return a.ExplicitMatch
+		}
+		if a.ExactMatch != b.ExactMatch {
+			return a.ExactMatch
+		}
+		if a.PreferredVSwitch != b.PreferredVSwitch {
+			return a.PreferredVSwitch
+		}
+		if a.PreferredZone != b.PreferredZone {
+			return a.PreferredZone
+		}
+		if a.CPU != b.CPU {
+			return a.CPU < b.CPU
+		}
+		if math.Abs(a.Memory-b.Memory) >= 0.01 {
+			return a.Memory < b.Memory
+		}
+		aHasPrice := a.SpotPrice > 0
+		bHasPrice := b.SpotPrice > 0
+		if aHasPrice && bHasPrice && math.Abs(a.SpotPrice-b.SpotPrice) >= 0.0001 {
+			return a.SpotPrice < b.SpotPrice
+		}
+		fa := aliyunFamilyPriority(a.Family)
+		fb := aliyunFamilyPriority(b.Family)
+		if fa != fb {
+			return fa < fb
+		}
+		if aHasPrice != bHasPrice {
+			return aHasPrice
+		}
+		if a.StockCategory != b.StockCategory {
+			return a.StockCategory == "WithStock"
+		}
+		if a.InstanceType != b.InstanceType {
+			return a.InstanceType < b.InstanceType
+		}
+		return a.VSwitchID < b.VSwitchID
+	})
+}
+
+// aliyunFamilyPriority assigns a lower rank number to more cost-effective / entry-level Aliyun ECS instance families.
+func aliyunFamilyPriority(family string) int {
+	family = strings.ToLower(strings.TrimSpace(family))
+	switch {
+	case family == "ecs.t6" || family == "ecs.t5" || family == "ecs.s6" || family == "ecs.n4" || family == "ecs.xn4" || family == "ecs.mn4" || family == "ecs.e4":
+		return 1
+	case strings.HasPrefix(family, "ecs.e") || strings.HasPrefix(family, "ecs.u1") || strings.HasPrefix(family, "ecs.u2"):
+		return 2
+	case strings.HasPrefix(family, "ecs.c6") || strings.HasPrefix(family, "ecs.g6") || strings.HasPrefix(family, "ecs.r6") ||
+		strings.HasPrefix(family, "ecs.ic5") || strings.HasPrefix(family, "ecs.sn1") || strings.HasPrefix(family, "ecs.sn2"):
+		return 3
+	case strings.HasPrefix(family, "ecs.c7") || strings.HasPrefix(family, "ecs.g7") || strings.HasPrefix(family, "ecs.r7") ||
+		strings.HasPrefix(family, "ecs.c8") || strings.HasPrefix(family, "ecs.g8") || strings.HasPrefix(family, "ecs.r8"):
+		return 4
+	default:
+		return 5
+	}
+}
+
+func isAliyunDiskCategoryError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "SystemDisk") ||
+		strings.Contains(msg, "InvalidSystemDiskCategory")
+}
+
+func isAliyunRetryableCreateError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	retryCodes := []string{
+		"OperationDenied.NoStock",
+		"OperationDenied.NoSpotInventory",
+		"OperationDenied.ResourceControl",
+		"InstanceType.Offline",
+		"InvalidInstanceType",
+		"InvalidSystemDiskCategory",
+		"SpotPriceLimit",
+		"Zone.NotOnSale",
+		"ResourceNotAvailable",
+		"SoldOut",
+	}
+	for _, code := range retryCodes {
+		if strings.Contains(msg, code) {
+			return true
+		}
+	}
+	return false
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // Allocatepublicipaddress allocates a public IP for the Alibaba Cloud ECS instance.
@@ -553,7 +1601,21 @@ func ExtendAliyunInstances(ecsClient *ecs.Client, region string, ids []string, e
 	return nil
 }
 
-func dispatchTencent(action, region, hostname string, releasetime int64, maxprice float64, ids []string) {
+// TencentCandidate represents a ranked Tencent Cloud spot instance creation candidate.
+type TencentCandidate struct {
+	Zone              string
+	InstanceType      string
+	InstanceFamily    string
+	CPU               int
+	Memory            float64
+	UnitPriceDiscount float64
+	StatusCategory    string
+	ExplicitMatch     bool
+	ExactMatch        bool
+	PreferredZone     bool
+}
+
+func dispatchTencent(action, region, hostname string, releasetime int64, maxprice float64, ids []string, specOpts CreateSpecOptions) {
 	secretID := os.Getenv("TENCENTCLOUD_SECRET_ID")
 	secretKey := os.Getenv("TENCENTCLOUD_SECRET_KEY")
 	if secretID == "" || secretKey == "" {
@@ -570,13 +1632,25 @@ func dispatchTencent(action, region, hostname string, releasetime int64, maxpric
 	switch action {
 	case "create":
 		password := Randpassword(12)
-		runTencent(cvmClient, hostname, password, releasetime, maxprice)
+		runTencent(cvmClient, region, hostname, password, releasetime, maxprice, specOpts)
 	case "list":
 		instances, err := FetchTencentInstances(cvmClient, ids)
 		if err != nil {
 			log.Panicf("%v", err)
 		}
 		printInstanceTable(instances)
+	case "zones":
+		zones, err := FetchTencentZones(cvmClient)
+		if err != nil {
+			log.Panicf("%v", err)
+		}
+		printZoneTable(zones)
+	case "images":
+		images, err := FetchTencentPublicImages(cvmClient, specOpts.InstanceType)
+		if err != nil {
+			log.Panicf("%v", err)
+		}
+		printImageTable(images)
 	case "delete":
 		if err := DeleteTencentInstances(cvmClient, ids); err != nil {
 			log.Panicf("%v", err)
@@ -588,30 +1662,69 @@ func dispatchTencent(action, region, hostname string, releasetime int64, maxpric
 	}
 }
 
-func runTencent(cvmClient *cvm.Client, hostname, password string, releasetime int64, maxprice float64) {
-	zone := os.Getenv("TENCENTCLOUD_ZONE")
-	if zone == "" {
-		log.Fatal("environment variable TENCENTCLOUD_ZONE is required for creating a Tencent Cloud instance")
+func runTencent(cvmClient *cvm.Client, region, hostname, password string, releasetime int64, maxprice float64, specOpts CreateSpecOptions) {
+	preferredZone := strings.TrimSpace(os.Getenv("TENCENTCLOUD_ZONE"))
+	subnetID := strings.TrimSpace(os.Getenv("TENCENTCLOUD_SUBNET_ID"))
+	allowCrossZone := subnetID == "" || strings.EqualFold(subnetID, "DEFAULT")
+
+	if preferredZone == "" {
+		preferredZone = ResolveDefaultTencentZone(cvmClient, region)
 	}
 
-	instanceType := os.Getenv("TENCENTCLOUD_INSTANCE_TYPE")
-	if instanceType == "" {
-		instanceType = "SA2.MEDIUM2"
-	}
-
-	var err error
-	imageID := os.Getenv("TENCENTCLOUD_IMAGE_ID")
-	if imageID == "" {
-		imageID, err = ResolveTencentPublicImage(cvmClient, instanceType)
-		if err != nil {
-			log.Panicf("%v", err)
-		}
-	}
-
-	createStartTime := time.Now().UTC()
-	instanceID, err := CreateTencentSpotInstance(cvmClient, zone, instanceType, imageID, hostname, password, releasetime, maxprice, createStartTime)
+	candidates, err := SelectTencentCandidates(cvmClient, preferredZone, allowCrossZone, specOpts, maxprice)
 	if err != nil {
 		log.Panicf("%v", err)
+	}
+	if len(candidates) == 0 {
+		log.Panicf("no available Tencent Cloud spot instance types in stock for region=%s (preferredZone=%q, target=%dC%.1fG, type=%q, maxprice=%.4f)",
+			region, preferredZone, specOpts.CPU, specOpts.Memory, specOpts.InstanceType, maxprice)
+	}
+
+	fixedImageID := strings.TrimSpace(os.Getenv("TENCENTCLOUD_IMAGE_ID"))
+	imageCache := make(map[string]string)
+	var (
+		instanceID string
+		lastErr    error
+	)
+
+	for idx, cand := range candidates {
+		imageID := fixedImageID
+		if imageID == "" {
+			if cached, ok := imageCache[cand.InstanceType]; ok {
+				imageID = cached
+			} else {
+				resolved, imgErr := ResolveTencentPublicImage(cvmClient, cand.InstanceType)
+				if imgErr != nil {
+					lastErr = imgErr
+					log.Printf("[tencent][candidate %d/%d] skipping type=%s in zone=%s (no public image): %v",
+						idx+1, len(candidates), cand.InstanceType, cand.Zone, imgErr)
+					continue
+				}
+				imageCache[cand.InstanceType] = resolved
+				imageID = resolved
+			}
+		}
+
+		log.Printf("[tencent][candidate %d/%d] trying zone=%s type=%s (%dC%.1fG) unitPriceDiscount=%.4f stock=%s",
+			idx+1, len(candidates), cand.Zone, cand.InstanceType, cand.CPU, cand.Memory, cand.UnitPriceDiscount, cand.StatusCategory)
+
+		createStartTime := time.Now().UTC()
+		createdID, createErr := CreateTencentSpotInstance(cvmClient, cand.Zone, cand.InstanceType, imageID, hostname, password, releasetime, maxprice, createStartTime)
+		if createErr == nil {
+			instanceID = createdID
+			break
+		}
+		lastErr = createErr
+		if isTencentRetryableCreateError(createErr) {
+			log.Printf("[tencent] candidate %s in %s unavailable, falling back to next candidate: %v",
+				cand.InstanceType, cand.Zone, createErr)
+			continue
+		}
+		log.Panicf("%v", createErr)
+	}
+
+	if instanceID == "" {
+		log.Panicf("all %d Tencent Cloud spot candidates failed in region %s; last error: %v", len(candidates), region, lastErr)
 	}
 
 	allocatedIP := false
@@ -639,10 +1752,484 @@ func runTencent(cvmClient *cvm.Client, hostname, password string, releasetime in
 	}
 }
 
-// ResolveTencentPublicImage queries a supported public Linux image (preferring AlmaLinux) for the instance type.
-func ResolveTencentPublicImage(cvmClient *cvm.Client, instanceType string) (string, error) {
+// extractTencentZoneOrder parses a Tencent Cloud zone identifier (e.g. "ap-shanghai-8")
+// into whether it is a standard regional zone (vs special "-fsi-" financial zone) and its numeric suffix.
+func extractTencentZoneOrder(zone string) (isStandard bool, hasNum bool, zoneNum int) {
+	zone = strings.TrimSpace(zone)
+	lastDash := strings.LastIndex(zone, "-")
+	if lastDash <= 0 || lastDash == len(zone)-1 {
+		return false, false, 0
+	}
+	prefix := strings.ToLower(zone[:lastDash])
+	suffix := zone[lastDash+1:]
+	num, err := strconv.Atoi(suffix)
+	if err != nil {
+		return false, false, 0
+	}
+	isSpecial := strings.HasSuffix(prefix, "-fsi") || strings.Contains(prefix, "-fsi-")
+	return !isSpecial, true, num
+}
+
+// compareTencentZoneDesc returns true if zoneA is newer/higher-priority than zoneB
+// (e.g., "ap-shanghai-8" > "ap-shanghai-5" > "ap-shanghai-2" > "ap-shanghai-fsi-3").
+func compareTencentZoneDesc(zoneA, zoneB, zoneIDA, zoneIDB string) bool {
+	stdA, hasNumA, numA := extractTencentZoneOrder(zoneA)
+	stdB, hasNumB, numB := extractTencentZoneOrder(zoneB)
+	if stdA != stdB {
+		return stdA
+	}
+	if hasNumA != hasNumB {
+		return hasNumA
+	}
+	if hasNumA && numA != numB {
+		return numA > numB
+	}
+	idA, errA := strconv.Atoi(strings.TrimSpace(zoneIDA))
+	idB, errB := strconv.Atoi(strings.TrimSpace(zoneIDB))
+	if errA == nil && errB == nil && idA != idB {
+		return idA > idB
+	}
+	return zoneA > zoneB
+}
+
+// SelectLatestTencentZone selects the latest AVAILABLE zone from a list of Tencent Cloud ZoneInfo items
+// (e.g., "ap-shanghai-8" in ap-shanghai).
+func SelectLatestTencentZone(zoneSet []*cvm.ZoneInfo) string {
+	type zoneCand struct {
+		zone   string
+		zoneID string
+		avail  bool
+	}
+	var cands []zoneCand
+	for _, z := range zoneSet {
+		if z == nil || z.Zone == nil || strings.TrimSpace(*z.Zone) == "" {
+			continue
+		}
+		zone := strings.TrimSpace(*z.Zone)
+		zoneID := ""
+		if z.ZoneId != nil {
+			zoneID = strings.TrimSpace(*z.ZoneId)
+		}
+		state := "AVAILABLE"
+		if z.ZoneState != nil && strings.TrimSpace(*z.ZoneState) != "" {
+			state = strings.ToUpper(strings.TrimSpace(*z.ZoneState))
+		}
+		cands = append(cands, zoneCand{
+			zone:   zone,
+			zoneID: zoneID,
+			avail:  state == "AVAILABLE",
+		})
+	}
+	if len(cands) == 0 {
+		return ""
+	}
+	sort.SliceStable(cands, func(i, j int) bool {
+		if cands[i].avail != cands[j].avail {
+			return cands[i].avail
+		}
+		return compareTencentZoneDesc(cands[i].zone, cands[j].zone, cands[i].zoneID, cands[j].zoneID)
+	})
+	return cands[0].zone
+}
+
+// ResolveDefaultTencentZone queries DescribeZones to find the latest available zone in the region (e.g. ap-shanghai-8).
+func ResolveDefaultTencentZone(cvmClient *cvm.Client, region string) string {
+	req := cvm.NewDescribeZonesRequest()
+	resp, err := cvmClient.DescribeZones(req)
+	if err != nil || resp.Response == nil || len(resp.Response.ZoneSet) == 0 {
+		return ""
+	}
+	latest := SelectLatestTencentZone(resp.Response.ZoneSet)
+	if latest != "" {
+		log.Printf("resolved default Tencent Cloud latest zone for region %s: %s", region, latest)
+	}
+	return latest
+}
+
+// FetchTencentZones queries availability zones in the current Tencent Cloud region and marks the default (latest) zone.
+func FetchTencentZones(cvmClient *cvm.Client) ([]ZoneSummary, error) {
+	req := cvm.NewDescribeZonesRequest()
+	resp, err := cvmClient.DescribeZones(req)
+	if err != nil {
+		return nil, fmt.Errorf("DescribeZones failed: %w", err)
+	}
+	if resp.Response == nil || len(resp.Response.ZoneSet) == 0 {
+		return nil, nil
+	}
+
+	defaultZone := strings.TrimSpace(os.Getenv("TENCENTCLOUD_ZONE"))
+	if defaultZone == "" {
+		defaultZone = SelectLatestTencentZone(resp.Response.ZoneSet)
+	}
+
+	var zones []ZoneSummary
+	for _, z := range resp.Response.ZoneSet {
+		if z == nil || z.Zone == nil || strings.TrimSpace(*z.Zone) == "" {
+			continue
+		}
+		zone := strings.TrimSpace(*z.Zone)
+		zoneID := ""
+		if z.ZoneId != nil {
+			zoneID = strings.TrimSpace(*z.ZoneId)
+		}
+		name := ""
+		if z.ZoneName != nil {
+			name = strings.TrimSpace(*z.ZoneName)
+		}
+		state := ""
+		if z.ZoneState != nil {
+			state = strings.TrimSpace(*z.ZoneState)
+		}
+		zones = append(zones, ZoneSummary{
+			Zone:      zone,
+			ZoneID:    zoneID,
+			Name:      name,
+			State:     state,
+			IsDefault: zone == defaultZone,
+		})
+	}
+
+	sort.SliceStable(zones, func(i, j int) bool {
+		availI := zones[i].State == "AVAILABLE"
+		availJ := zones[j].State == "AVAILABLE"
+		if availI != availJ {
+			return availI
+		}
+		return compareTencentZoneDesc(zones[i].Zone, zones[j].Zone, zones[i].ZoneID, zones[j].ZoneID)
+	})
+	return zones, nil
+}
+
+func inferLatestTencentZoneFromQuotaItems(items []*cvm.InstanceTypeQuotaItem) string {
+	var bestZone string
+	for _, item := range items {
+		if item == nil || item.Zone == nil {
+			continue
+		}
+		zone := strings.TrimSpace(*item.Zone)
+		status := ""
+		if item.Status != nil {
+			status = *item.Status
+		}
+		statusCategory := ""
+		if item.StatusCategory != nil {
+			statusCategory = *item.StatusCategory
+		}
+		if zone == "" || status != "SELL" || statusCategory == "WithoutStock" {
+			continue
+		}
+		if bestZone == "" || compareTencentZoneDesc(zone, bestZone, "", "") {
+			bestZone = zone
+		}
+	}
+	return bestZone
+}
+
+// SelectTencentCandidates queries DescribeZoneInstanceConfigInfos for SPOTPAID in-stock X86 instance types and ranks them by cost-effectiveness.
+func SelectTencentCandidates(cvmClient *cvm.Client, preferredZone string, allowCrossZone bool, opts CreateSpecOptions, maxprice float64) ([]TencentCandidate, error) {
+	req := cvm.NewDescribeZoneInstanceConfigInfosRequest()
+	req.Filters = []*cvm.Filter{
+		{
+			Name:   common.StringPtr("instance-charge-type"),
+			Values: []*string{common.StringPtr("SPOTPAID")},
+		},
+	}
+	if preferredZone != "" && !allowCrossZone {
+		req.Filters = append(req.Filters, &cvm.Filter{
+			Name:   common.StringPtr("zone"),
+			Values: []*string{common.StringPtr(preferredZone)},
+		})
+	}
+
+	resp, err := cvmClient.DescribeZoneInstanceConfigInfos(req)
+	if err != nil {
+		return nil, fmt.Errorf("DescribeZoneInstanceConfigInfos failed: %w", err)
+	}
+	if resp.Response == nil || len(resp.Response.InstanceTypeQuotaSet) == 0 {
+		return nil, nil
+	}
+	return buildTencentCandidates(resp.Response.InstanceTypeQuotaSet, preferredZone, allowCrossZone, opts, maxprice), nil
+}
+
+func buildTencentCandidates(items []*cvm.InstanceTypeQuotaItem, preferredZone string, allowCrossZone bool, opts CreateSpecOptions, maxprice float64) []TencentCandidate {
+	preferredZone = strings.TrimSpace(preferredZone)
+	if preferredZone == "" {
+		preferredZone = inferLatestTencentZoneFromQuotaItems(items)
+	}
+
+	var allCandidates []TencentCandidate
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		zone := ""
+		if item.Zone != nil {
+			zone = *item.Zone
+		}
+		instType := ""
+		if item.InstanceType != nil {
+			instType = *item.InstanceType
+		}
+		status := ""
+		if item.Status != nil {
+			status = *item.Status
+		}
+		statusCategory := ""
+		if item.StatusCategory != nil {
+			statusCategory = *item.StatusCategory
+		}
+		if zone == "" || instType == "" || status != "SELL" || statusCategory == "WithoutStock" {
+			continue
+		}
+		if preferredZone != "" && !allowCrossZone && zone != preferredZone {
+			continue
+		}
+
+		explicitMatch := opts.InstanceType != "" && strings.EqualFold(instType, opts.InstanceType)
+		if !explicitMatch {
+			if item.Gpu != nil && *item.Gpu > 0 {
+				continue
+			}
+			if item.Fpga != nil && *item.Fpga > 0 {
+				continue
+			}
+			if item.StorageBlockAmount != nil && *item.StorageBlockAmount > 0 {
+				continue
+			}
+			family := ""
+			if item.InstanceFamily != nil {
+				family = *item.InstanceFamily
+			}
+			cpuType := ""
+			if item.CpuType != nil {
+				cpuType = *item.CpuType
+			}
+			if isTencentARMInstance(family, cpuType) {
+				continue
+			}
+		}
+
+		cpu := 0
+		if item.Cpu != nil {
+			cpu = int(*item.Cpu)
+		}
+		memory := 0.0
+		if item.Memory != nil {
+			memory = float64(*item.Memory)
+		}
+		exactMatch := cpu == opts.CPU && math.Abs(memory-opts.Memory) < 0.01
+		upwardMatch := cpu >= opts.CPU && memory+0.01 >= opts.Memory &&
+			cpu <= maxInt(opts.CPU*4, 4) && memory <= math.Max(opts.Memory*4, 8.0)
+		if !explicitMatch && !exactMatch && !upwardMatch {
+			continue
+		}
+
+		unitPriceDiscount := 0.0
+		if item.Price != nil && item.Price.UnitPriceDiscount != nil {
+			unitPriceDiscount = *item.Price.UnitPriceDiscount
+		}
+		family := ""
+		if item.InstanceFamily != nil {
+			family = *item.InstanceFamily
+		}
+
+		allCandidates = append(allCandidates, TencentCandidate{
+			Zone:              zone,
+			InstanceType:      instType,
+			InstanceFamily:    family,
+			CPU:               cpu,
+			Memory:            memory,
+			UnitPriceDiscount: unitPriceDiscount,
+			StatusCategory:    statusCategory,
+			ExplicitMatch:     explicitMatch,
+			ExactMatch:        exactMatch,
+			PreferredZone:     preferredZone != "" && zone == preferredZone,
+		})
+	}
+
+	var withinBudget []TencentCandidate
+	for _, c := range allCandidates {
+		if c.UnitPriceDiscount > 0 && c.UnitPriceDiscount > maxprice {
+			continue
+		}
+		withinBudget = append(withinBudget, c)
+	}
+	if len(withinBudget) == 0 {
+		withinBudget = allCandidates
+	}
+	sortTencentCandidates(withinBudget)
+	return withinBudget
+}
+
+func sortTencentCandidates(candidates []TencentCandidate) {
+	sort.SliceStable(candidates, func(i, j int) bool {
+		a, b := candidates[i], candidates[j]
+		if a.ExplicitMatch != b.ExplicitMatch {
+			return a.ExplicitMatch
+		}
+		if a.ExactMatch != b.ExactMatch {
+			return a.ExactMatch
+		}
+		if a.PreferredZone != b.PreferredZone {
+			return a.PreferredZone
+		}
+		if a.CPU != b.CPU {
+			return a.CPU < b.CPU
+		}
+		if math.Abs(a.Memory-b.Memory) >= 0.01 {
+			return a.Memory < b.Memory
+		}
+		aHasPrice := a.UnitPriceDiscount > 0
+		bHasPrice := b.UnitPriceDiscount > 0
+		if aHasPrice && bHasPrice && math.Abs(a.UnitPriceDiscount-b.UnitPriceDiscount) >= 0.0001 {
+			return a.UnitPriceDiscount < b.UnitPriceDiscount
+		}
+		if aHasPrice != bHasPrice {
+			return aHasPrice
+		}
+		fa := tencentFamilyPriority(a.InstanceFamily)
+		fb := tencentFamilyPriority(b.InstanceFamily)
+		if fa != fb {
+			return fa < fb
+		}
+		sa := tencentStockPriority(a.StatusCategory)
+		sb := tencentStockPriority(b.StatusCategory)
+		if sa != sb {
+			return sa < sb
+		}
+		if a.Zone != b.Zone {
+			return compareTencentZoneDesc(a.Zone, b.Zone, "", "")
+		}
+		return a.InstanceType < b.InstanceType
+	})
+}
+
+func isTencentARMInstance(family, cpuType string) bool {
+	famUpper := strings.ToUpper(strings.TrimSpace(family))
+	cpuUpper := strings.ToUpper(strings.TrimSpace(cpuType))
+	if strings.HasPrefix(famUpper, "SR") || famUpper == "SA3K" || famUpper == "S6M" {
+		return true
+	}
+	if strings.Contains(cpuUpper, "ARM") || strings.Contains(cpuUpper, "AMPERE") || strings.Contains(cpuUpper, "KUNPENG") {
+		return true
+	}
+	return false
+}
+
+func tencentFamilyPriority(family string) int {
+	famUpper := strings.ToUpper(strings.TrimSpace(family))
+	switch famUpper {
+	case "SA2", "SA3", "S5SE", "S2", "S3", "S4", "S5":
+		return 1
+	case "SA4", "SA5", "S6", "S7", "S8":
+		return 2
+	case "MA2", "MA3", "M2", "M3", "M4", "M5", "M6", "C2", "C3", "C4", "C5", "C6":
+		return 3
+	default:
+		return 4
+	}
+}
+
+func tencentStockPriority(statusCategory string) int {
+	switch statusCategory {
+	case "EnoughStock":
+		return 1
+	case "NormalStock":
+		return 2
+	case "UnderStock":
+		return 3
+	default:
+		return 4
+	}
+}
+
+func isTencentRetryableCreateError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	retryCodes := []string{
+		"ResourcesSoldOut",
+		"ResourceInsufficient",
+		"ZoneNotSupported",
+		"InstanceTypeNotSupport",
+		"SoldOut",
+		"NoStock",
+		"InsufficientSpotInstanceStock",
+		"InvalidParameterValue.InstanceType",
+		"InvalidParameterValue.SystemDiskType",
+		"InvalidParameterValue.Zone",
+		"UnsupportedOperation",
+	}
+	for _, code := range retryCodes {
+		if strings.Contains(msg, code) {
+			return true
+		}
+	}
+	return false
+}
+
+func convertAndRankTencentImages(imageSet []*cvm.Image, requireAlmaLinux bool) []PublicImageSummary {
+	var result []PublicImageSummary
+	for _, img := range imageSet {
+		if img == nil || img.ImageId == nil || strings.TrimSpace(*img.ImageId) == "" {
+			continue
+		}
+		if img.ImageState != nil && *img.ImageState != "" && *img.ImageState != "NORMAL" {
+			continue
+		}
+		arch := ""
+		if img.Architecture != nil {
+			arch = strings.TrimSpace(*img.Architecture)
+		}
+		archLower := strings.ToLower(arch)
+		if archLower == "arm" || archLower == "arm64" || archLower == "i386" {
+			continue
+		}
+		imageID := strings.TrimSpace(*img.ImageId)
+		imageName := ""
+		if img.ImageName != nil {
+			imageName = strings.TrimSpace(*img.ImageName)
+		}
+		osName := ""
+		if img.OsName != nil {
+			osName = strings.TrimSpace(*img.OsName)
+		}
+		platform := ""
+		if img.Platform != nil {
+			platform = strings.TrimSpace(*img.Platform)
+		}
+		if requireAlmaLinux && !isAlmaLinuxImage(platform, osName, imageName, imageID) {
+			continue
+		}
+		sizeGiB := int64(0)
+		if img.ImageSize != nil {
+			sizeGiB = *img.ImageSize
+		}
+		createdTime := ""
+		if img.CreatedTime != nil {
+			createdTime = strings.TrimSpace(*img.CreatedTime)
+		}
+		result = append(result, PublicImageSummary{
+			ImageID:     imageID,
+			ImageName:   imageName,
+			OSName:      osName,
+			Platform:    platform,
+			Arch:        arch,
+			SizeGiB:     sizeGiB,
+			CreatedTime: createdTime,
+		})
+	}
+	sortPublicImagesDesc(result)
+	return result
+}
+
+// FetchTencentPublicImages queries Tencent Cloud public x86_64 AlmaLinux images and ranks the latest version (e.g. 10.x) first.
+func FetchTencentPublicImages(cvmClient *cvm.Client, instanceType string) ([]PublicImageSummary, error) {
 	request := cvm.NewDescribeImagesRequest()
-	request.InstanceType = common.StringPtr(instanceType)
+	if strings.TrimSpace(instanceType) != "" {
+		request.InstanceType = common.StringPtr(strings.TrimSpace(instanceType))
+	}
 	request.Filters = []*cvm.Filter{
 		{
 			Name:   common.StringPtr("image-type"),
@@ -653,36 +2240,55 @@ func ResolveTencentPublicImage(cvmClient *cvm.Client, instanceType string) (stri
 			Values: []*string{common.StringPtr("AlmaLinux")},
 		},
 	}
-	request.Limit = common.Uint64Ptr(1)
+	request.Limit = common.Uint64Ptr(100)
 
 	response, err := cvmClient.DescribeImages(request)
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("DescribeImages failed: %w", err)
 	}
-	if response.Response != nil && len(response.Response.ImageSet) > 0 && response.Response.ImageSet[0].ImageId != nil {
-		imageID := *response.Response.ImageSet[0].ImageId
-		log.Printf("resolved Tencent Cloud public image: %s", imageID)
-		return imageID, nil
+	if response.Response != nil && len(response.Response.ImageSet) > 0 {
+		images := convertAndRankTencentImages(response.Response.ImageSet, true)
+		if len(images) > 0 {
+			return images, nil
+		}
 	}
 
-	// Fallback to any public image supported by the instance type
+	// Fallback: query PUBLIC_IMAGE without platform filter and filter for AlmaLinux first
 	fallbackReq := cvm.NewDescribeImagesRequest()
-	fallbackReq.InstanceType = common.StringPtr(instanceType)
+	if strings.TrimSpace(instanceType) != "" {
+		fallbackReq.InstanceType = common.StringPtr(strings.TrimSpace(instanceType))
+	}
 	fallbackReq.Filters = []*cvm.Filter{
 		{
 			Name:   common.StringPtr("image-type"),
 			Values: []*string{common.StringPtr("PUBLIC_IMAGE")},
 		},
 	}
-	fallbackReq.Limit = common.Uint64Ptr(1)
+	fallbackReq.Limit = common.Uint64Ptr(100)
 	fallbackResp, err := cvmClient.DescribeImages(fallbackReq)
+	if err != nil {
+		return nil, fmt.Errorf("DescribeImages fallback failed: %w", err)
+	}
+	if fallbackResp.Response == nil || len(fallbackResp.Response.ImageSet) == 0 {
+		return nil, nil
+	}
+	almaImages := convertAndRankTencentImages(fallbackResp.Response.ImageSet, true)
+	if len(almaImages) > 0 {
+		return almaImages, nil
+	}
+	return convertAndRankTencentImages(fallbackResp.Response.ImageSet, false), nil
+}
+
+// ResolveTencentPublicImage queries the latest supported public AlmaLinux image (e.g. AlmaLinux 10.x) for the instance type.
+func ResolveTencentPublicImage(cvmClient *cvm.Client, instanceType string) (string, error) {
+	images, err := FetchTencentPublicImages(cvmClient, instanceType)
 	if err != nil {
 		return "", err
 	}
-	if fallbackResp.Response != nil && len(fallbackResp.Response.ImageSet) > 0 && fallbackResp.Response.ImageSet[0].ImageId != nil {
-		imageID := *fallbackResp.Response.ImageSet[0].ImageId
-		log.Printf("resolved Tencent Cloud fallback public image: %s", imageID)
-		return imageID, nil
+	if len(images) > 0 {
+		chosen := images[0]
+		log.Printf("resolved latest Tencent Cloud public image: %s (%s)", chosen.ImageID, chosen.OSName)
+		return chosen.ImageID, nil
 	}
 	return "", fmt.Errorf("no available public image found for instance type %s; please set TENCENTCLOUD_IMAGE_ID", instanceType)
 }
